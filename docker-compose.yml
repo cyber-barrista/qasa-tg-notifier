@@ -1,0 +1,5 @@
+services:
+  qasa-tg-notifier:
+    # built by `make local` (nix dockerTools, not a Dockerfile)
+    image: qasa-tg-notifier:local
+    restart: unless-stopped

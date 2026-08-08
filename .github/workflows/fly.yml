@@ -1,0 +1,37 @@
+name: Deploy to Fly.io
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: fly-deploy
+
+env:
+  FLY_APP: qasa-tg-notifier
+
+jobs:
+  deploy:
+    # ubuntu-latest is x86_64 — same arch as Fly machines, so the image
+    # builds natively (no emulation, no cross-compilation)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: DeterminateSystems/nix-installer-action@v22
+
+      - name: Build image with nix
+        run: make image IMAGE="registry.fly.io/$FLY_APP" TAG="$GITHUB_SHA"
+
+      - uses: superfly/flyctl-actions/setup-flyctl@1.5
+        with:
+          version: 0.4.80
+
+      - name: Push image and deploy
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          flyctl auth docker
+          docker push "registry.fly.io/$FLY_APP:$GITHUB_SHA"
+          flyctl deploy --image "registry.fly.io/$FLY_APP:$GITHUB_SHA"

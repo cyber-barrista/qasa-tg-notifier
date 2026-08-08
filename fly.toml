@@ -1,0 +1,8 @@
+# Deployed by CI with `flyctl deploy --image ...` — no [build] section on
+# purpose; the image is built from flake.nix (packages.docker), not a Dockerfile.
+app = "qasa-tg-notifier"
+primary_region = "arn"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
