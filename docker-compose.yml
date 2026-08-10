@@ -3,3 +3,13 @@ services:
     # built by `make local` (nix dockerTools, not a Dockerfile)
     image: qasa-tg-notifier:local
     restart: unless-stopped
+    # BOT_TOKEN and CHAT_ID come from a local .env file (gitignored);
+    # the rest have image/compose defaults.
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      QASA_AREA: se/stockholm
+      HOME_TYPES: apartment
+      POLL_INTERVAL_HOURS: "3"
+      MAX_NOTIFY_PER_CYCLE: "40"

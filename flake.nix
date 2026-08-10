@@ -22,6 +22,11 @@
           version = "0.1.0";
           src = ./.;
           cargoLock.lockFile = ./Cargo.lock;
+
+          # reqwest's rustls stack pulls aws-lc-rs, whose -sys crate builds C
+          # (cmake) and, on x86_64, assembles with nasm (perl drives some
+          # codegen). These aren't in the pure build sandbox by default.
+          nativeBuildInputs = with p; [ cmake perl nasm ];
         };
       in
       {
@@ -34,7 +39,19 @@
           # store hash; `make image TAG=...` applies the real tag on load.
           docker = linuxPkgs.dockerTools.buildLayeredImage {
             name = "qasa-tg-notifier";
-            config.Entrypoint = [ "${mkQasa linuxPkgs}/bin/qasa-tg-notifier" ];
+            # rustls verifies TLS against the system trust store, which a
+            # scratch image lacks; ship CA certs and point rustls at them so
+            # HTTPS to api.qasa.com and api.telegram.org works.
+            contents = [ linuxPkgs.cacert ];
+            config = {
+              Entrypoint = [ "${mkQasa linuxPkgs}/bin/qasa-tg-notifier" ];
+              Env = [
+                "SSL_CERT_FILE=${linuxPkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+                "QASA_AREA=se/stockholm"
+                "HOME_TYPES=apartment"
+                "POLL_INTERVAL_HOURS=3"
+              ];
+            };
           };
         };
 
@@ -45,6 +62,11 @@
             rustfmt
             clippy
             rust-analyzer
+            # Build deps for aws-lc-rs (pulled by reqwest's rustls), so a
+            # clean `nix develop` builds without relying on host tools.
+            cmake
+            perl
+            nasm
           ];
 
           env.RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";

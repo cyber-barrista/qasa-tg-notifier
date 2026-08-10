@@ -3,6 +3,14 @@
 app = "qasa-tg-notifier"
 primary_region = "arn"
 
+# Non-secret runtime config. Secrets (BOT_TOKEN, CHAT_ID) are set out-of-band
+# with `fly secrets set` and injected as env vars — never committed here.
+[env]
+  QASA_AREA = "se/stockholm"
+  HOME_TYPES = "apartment"
+  POLL_INTERVAL_HOURS = "3"
+  MAX_NOTIFY_PER_CYCLE = "40"
+
 [[vm]]
   size = "shared-cpu-1x"
   memory = "256mb"

@@ -2,3 +2,4 @@ target/
 result
 .claude/
 .direnv/
+.env
