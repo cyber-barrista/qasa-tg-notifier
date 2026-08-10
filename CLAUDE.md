@@ -67,11 +67,11 @@ slugs silently return a country-wide result, so only verified ones are included.
 - `CHAT_ID` (**secret**, required) — target chat id (i64).
 - `QASA_AREA` (default `se/stockholm`), `HOME_TYPES` (default `apartment`,
   comma-separated), `POLL_INTERVAL_HOURS` (default `3`),
-  `MAX_NOTIFY_PER_CYCLE` (default `15`), `QASA_ENDPOINT`, `RUST_LOG`.
+  `MAX_NOTIFY_PER_CYCLE` (default `40`), `QASA_ENDPOINT`, `RUST_LOG`.
 
-Non-secret defaults live in `fly.toml [env]` and the image `config.Env`; secrets
-come from `fly secrets set`. Locally, `make run` reads `BOT_TOKEN`/`CHAT_ID` from
-a gitignored `.env` (see `.env.example`).
+Non-secret defaults live in `.github/fly.toml [env]` and the image `config.Env`;
+secrets come from `fly secrets set`. Locally, `make run` reads `BOT_TOKEN`/
+`CHAT_ID` from a gitignored `.env` (see `.env.example`).
 
 ## Build & run
 
@@ -128,13 +128,23 @@ a gitignored `.env` (see `.env.example`).
 
 ## Deploy (Fly.io)
 
-- `.github/workflows/fly.yml`: on push to `main`, `ubuntu-latest` (x86_64 —
-  same arch as Fly machines, so the nix build is native there) builds the
-  image via `make image`, pushes to `registry.fly.io`, deploys with
-  `flyctl deploy --image` tagged by commit SHA. Actions and flyctl are pinned
-  to exact versions; bump them deliberately.
-- `fly.toml` intentionally has **no `[build]` section** — the image always
-  comes from CI, never from a Dockerfile (there is none in this repo).
+- `.github/workflows/fly.yml`: on push to `master`, `ubuntu-latest` (x86_64 —
+  same arch as Fly machines, so the nix build is native there) tags the image by
+  its **nix store hash** (a pure `nix eval`), and **only builds/pushes/deploys if
+  that tag differs from what Fly currently runs** — so doc/CI/config edits are
+  no-ops. When it does deploy: `make image`, push to `registry.fly.io`, then
+  `flyctl deploy --config .github/fly.toml --image … --ha=false`. Actions and
+  flyctl are pinned to exact versions; bump them deliberately.
+- The content-addressed skip relies on `flake.nix` filtering `src` to just
+  `Cargo.toml`/`Cargo.lock`/`src/` (so unrelated files don't perturb the hash).
+  Add any new build input (e.g. a `build.rs`) to that `fileset`.
+- `--ha=false` keeps it to a **single machine** — Fly otherwise spins up a
+  standby for a services-less app. To remove an already-created standby once:
+  `fly scale count 1 -a qasa-tg-notifier`.
+- **`fly.toml` lives at `.github/fly.toml`** (deploy infra, not project code), so
+  every `flyctl` call must pass `--config .github/fly.toml`. It has **no
+  `[build]` section** on purpose — the image always comes from CI, never a
+  Dockerfile (there is none).
 - One-time prerequisites (not yet done): push repo to GitHub,
   `fly apps create qasa-tg-notifier`, set `FLY_API_TOKEN` repo secret from
   `fly tokens create deploy`.

@@ -17,10 +17,23 @@
           builtins.replaceStrings [ "darwin" ] [ "linux" ] system
         };
 
+        # Only the files that actually affect the build. Doc/CI/deploy-config
+        # edits (README, CLAUDE.md, fly.toml, .github, …) are excluded, so they
+        # don't change the derivation — and therefore the image's store hash /
+        # tag stays identical, letting CI skip a redundant push + deploy.
+        src = pkgs.lib.fileset.toSource {
+          root = ./.;
+          fileset = pkgs.lib.fileset.unions [
+            ./Cargo.toml
+            ./Cargo.lock
+            ./src
+          ];
+        };
+
         mkQasa = p: p.rustPlatform.buildRustPackage {
           pname = "qasa-tg-notifier";
           version = "0.1.0";
-          src = ./.;
+          inherit src;
           cargoLock.lockFile = ./Cargo.lock;
 
           # reqwest's rustls stack pulls aws-lc-rs, whose -sys crate builds C

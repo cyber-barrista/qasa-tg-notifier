@@ -21,17 +21,51 @@ jobs:
 
       - uses: DeterminateSystems/nix-installer-action@v22
 
-      - name: Build image with nix
-        run: make image IMAGE="registry.fly.io/$FLY_APP" TAG="$GITHUB_SHA"
+      # The image's nix store hash is content-addressed and (via the filtered
+      # `src` in flake.nix) unaffected by doc/CI/config edits. Use it as the
+      # image tag so an unchanged build produces an unchanged tag. This is a
+      # pure eval — no build yet.
+      - name: Compute image content tag
+        id: img
+        run: echo "tag=$(nix eval --raw .#docker.outPath | xargs basename | cut -d- -f1)" >> "$GITHUB_OUTPUT"
 
       - uses: superfly/flyctl-actions/setup-flyctl@1.5
         with:
           version: 0.4.80
 
-      - name: Push image and deploy
+      # Skip the whole build/push/deploy if Fly already runs this exact image.
+      # jq falls back to empty on any shape mismatch, so we fail open (deploy).
+      - name: Check currently deployed image
+        id: check
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
         run: |
+          current=$(flyctl image show -a "$FLY_APP" --json 2>/dev/null \
+            | jq -r '(if type=="array" then .[0] else . end).Tag // empty' 2>/dev/null || true)
+          echo "currently deployed tag: ${current:-<none>}"
+          echo "new content tag:        ${{ steps.img.outputs.tag }}"
+          if [ -n "$current" ] && [ "$current" = "${{ steps.img.outputs.tag }}" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build, push and deploy
+        if: steps.check.outputs.skip != 'true'
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          TAG: ${{ steps.img.outputs.tag }}
+        run: |
+          make image IMAGE="registry.fly.io/$FLY_APP" TAG="$TAG"
           flyctl auth docker
-          docker push "registry.fly.io/$FLY_APP:$GITHUB_SHA"
-          flyctl deploy --image "registry.fly.io/$FLY_APP:$GITHUB_SHA"
+          docker push "registry.fly.io/$FLY_APP:$TAG"
+          # --config: fly.toml lives under .github/, not the repo root.
+          # --ha=false: single machine, no standby (this app has no services).
+          flyctl deploy \
+            --config .github/fly.toml \
+            --image "registry.fly.io/$FLY_APP:$TAG" \
+            --ha=false
+
+      - name: Skipped (image unchanged)
+        if: steps.check.outputs.skip == 'true'
+        run: echo "Image ${{ steps.img.outputs.tag }} is already deployed — nothing to do."

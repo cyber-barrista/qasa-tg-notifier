@@ -1,5 +1,10 @@
-# Deployed by CI with `flyctl deploy --image ...` — no [build] section on
-# purpose; the image is built from flake.nix (packages.docker), not a Dockerfile.
+# Fly.io deploy config — lives here (next to the CI pipeline in
+# .github/workflows/) rather than the repo root, since it's deployment
+# infrastructure, not part of the Rust project. CI passes it explicitly via
+# `flyctl deploy --config .github/fly.toml`.
+#
+# No [build] section on purpose; the image is built from flake.nix
+# (packages.docker), not a Dockerfile.
 app = "qasa-tg-notifier"
 primary_region = "arn"
 
