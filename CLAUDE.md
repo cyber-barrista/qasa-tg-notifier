@@ -34,8 +34,9 @@ listings and pushes each new one to a Telegram chat. The query sets
     found by probing. The area typeahead the site uses is the `SearchAreaKeyword`
     GraphQL op, but its coverage is spotty, so the list was built by
     count-probing candidate names and keeping those that returned a real subset.
-- **`/start` / `/help`** — usage. Commands are honored only from the configured
-  `CHAT_ID`.
+- **`/start` / `/help`** — usage. Commands are honored from the configured
+  `CHAT_ID` and from any private (direct-message) chat; other group chats are
+  ignored. Scheduled notifications still go only to `CHAT_ID`.
 
 Two concurrent loops run (`tokio::spawn` + `select!`): the periodic notifier and
 the command listener (handles both messages and `CallbackQuery` button presses).

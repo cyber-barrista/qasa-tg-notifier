@@ -13,7 +13,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use frankenstein::client_reqwest::Bot;
 use frankenstein::methods::GetUpdatesParams;
-use frankenstein::types::{CallbackQuery, MaybeInaccessibleMessage, User};
+use frankenstein::types::{CallbackQuery, Chat, ChatType, MaybeInaccessibleMessage, User};
 use frankenstein::updates::UpdateContent;
 use frankenstein::AsyncTelegramApi;
 use time::OffsetDateTime;
@@ -170,7 +170,7 @@ async fn command_loop(http: reqwest::Client, bot: Bot, cfg: Config) {
                                     &bot,
                                     &cfg,
                                     &mut sessions,
-                                    message.chat.id,
+                                    &message.chat,
                                     user,
                                     text,
                                 )
@@ -192,6 +192,13 @@ async fn command_loop(http: reqwest::Client, bot: Bot, cfg: Config) {
     }
 }
 
+/// Whether the bot serves commands from this chat: the configured group chat
+/// plus any one-on-one (private) chat. Other groups it may get added to are
+/// ignored. Scheduled notifications still go only to `cfg.chat_id`.
+fn chat_allowed(cfg: &Config, chat: &Chat) -> bool {
+    chat.id == cfg.chat_id || chat.type_field == ChatType::Private
+}
+
 /// Render a Telegram user for logs, e.g. `Anna (id=123, @anna)`.
 fn describe_user(user: Option<&User>) -> String {
     match user {
@@ -210,14 +217,15 @@ async fn handle_message(
     bot: &Bot,
     cfg: &Config,
     sessions: &mut Sessions,
-    chat_id: i64,
+    chat: &Chat,
     user: Option<&User>,
     text: &str,
 ) {
-    if chat_id != cfg.chat_id {
-        debug!(chat_id, "ignoring message from non-target chat");
+    if !chat_allowed(cfg, chat) {
+        debug!(chat_id = chat.id, "ignoring message from non-target chat");
         return;
     }
+    let chat_id = chat.id;
     let mut parts = text.split_whitespace();
     let Some(raw) = parts.next() else {
         return;
@@ -240,7 +248,7 @@ async fn handle_message(
         }
         "/start" | "/help" => {
             info!(user = %who, command = cmd, "help requested");
-            let _ = telegram::send_note(bot, cfg.chat_id, HELP).await;
+            let _ = telegram::send_note(bot, chat_id, HELP).await;
         }
         other => {
             debug!(user = %who, text = other, "ignoring non-command message");
@@ -266,14 +274,15 @@ async fn handle_callback(
     let Some(message) = query.message.as_ref() else {
         return;
     };
-    let (chat_id, message_id) = match message {
-        MaybeInaccessibleMessage::Message(m) => (m.chat.id, m.message_id),
-        MaybeInaccessibleMessage::InaccessibleMessage(m) => (m.chat.id, m.message_id),
+    let (chat, message_id) = match message {
+        MaybeInaccessibleMessage::Message(m) => (&*m.chat, m.message_id),
+        MaybeInaccessibleMessage::InaccessibleMessage(m) => (&m.chat, m.message_id),
     };
-    if chat_id != cfg.chat_id {
-        debug!(user = %who, chat_id, "ignoring callback from non-target chat");
+    if !chat_allowed(cfg, chat) {
+        debug!(user = %who, chat_id = chat.id, "ignoring callback from non-target chat");
         return;
     }
+    let chat_id = chat.id;
     debug!(user = %who, button = data, "button pressed");
 
     let key = (chat_id, message_id);
