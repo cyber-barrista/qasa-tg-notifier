@@ -34,12 +34,43 @@ listings and pushes each new one to a Telegram chat. The query sets
     found by probing. The area typeahead the site uses is the `SearchAreaKeyword`
     GraphQL op, but its coverage is spotty, so the list was built by
     count-probing candidate names and keeping those that returned a real subset.
+- **`/bostad`** — same filter-UI pattern (`bostad_search::{Screen, render, apply,
+  passes}`) over the **Bostadsförmedlingen** feed: category (⚡ Bostad snabbt /
+  student / regular / all), kommun multi-select (25 kommuner, labels matched
+  verbatim against the feed's `Kommun` strings), min rooms, min/max rent. The
+  whole feed is one JSON array, so all filters are client-side. Sessions for
+  both UIs share one map via the `Session` enum in `main.rs`.
 - **`/start` / `/help`** — usage. Commands are honored from the configured
-  `CHAT_ID` and from any private (direct-message) chat; other group chats are
-  ignored. Scheduled notifications still go only to `CHAT_ID`.
+  `CHAT_ID`, from `BOSTAD_CHAT_ID`, and from any private (direct-message) chat;
+  other group chats are ignored. Scheduled notifications still go only to their
+  configured chat.
 
-Two concurrent loops run (`tokio::spawn` + `select!`): the periodic notifier and
-the command listener (handles both messages and `CallbackQuery` button presses).
+## Bostad snabbt notifier (second notifier, same binary)
+
+Bostadsförmedlingen's fast track ("Bostad snabbt", ex-Bostadssnabben) allocates
+**first-come-first-served** among housing-queue members — the one Stockholm
+channel where notification speed wins housing — so it polls much faster
+(default every 10 min) than the Qasa loop. `bostad.rs` fetches
+`https://bostad.stockholm.se/AllaAnnonser/`: public unauthenticated JSON, one
+array of ALL live ads (~500) with per-ad category booleans (`BostadSnabbt`,
+`Student`, `Ungdom`, `Vanlig`, `KortKotid`…), Swedish and partly non-ASCII keys
+(`Hyra`, `Yta`, `LägstaHyran`), no paging. The notifier keeps `BostadSnabbt`
+ads only and posts new ones to `BOSTAD_CHAT_ID` (unset ⇒ notifier disabled;
+the `/bostad` command works regardless).
+
+- **Dedup is a seen-id *set*, not a watermark**: `AnnonsId` is NOT monotonic
+  with publish date (verified: ads published 2026-08-31 carried ids below the
+  08-29 maximum — early-created, late-published), so a high-watermark would
+  silently miss ads. The set is persisted in the bostad chat's pinned message
+  (`seen=<comma-separated ids>`), pruned each cycle to ads still live (a
+  handful), plus what was just sent. Don't "simplify" it back to a watermark.
+- `BOSTAD_CHAT_ID` must differ from `CHAT_ID` (enforced at startup): each
+  notifier stores state in *the* pinned message of its chat, and `getChat`
+  exposes only the most recently pinned one.
+
+Three concurrent loops run (`tokio::spawn` + `select!`): the periodic Qasa
+notifier, the (optional) bostad notifier, and the command listener (handles
+both messages and `CallbackQuery` button presses).
 **Only one instance may run per bot token** — Telegram returns 409 if two poll
 `getUpdates` at once, so don't run `make debug` while the container/Fly app is
 live. The neighborhood slug list in `search.rs` is curated — invalid Qasa area
@@ -47,8 +78,10 @@ slugs silently return a country-wide result, so only verified ones are included.
 
 - **Modules:** `config.rs` (env → `Config`), `qasa.rs` (GraphQL client:
   hand-written query `const` + drift-tolerant `Option`/`#[serde(default)]`
-  structs; `fetch_new` pages by offset/limit), `telegram.rs` (frankenstein
-  wrapper), `main.rs` (interval loop → `run_cycle`).
+  structs; `fetch_new` pages by offset/limit), `bostad.rs` (Bostadsförmedlingen
+  feed client, same drift-tolerant style), `bostad_search.rs` (`/bostad` UI),
+  `telegram.rs` (frankenstein wrapper), `main.rs` (interval loops →
+  `run_cycle` / `run_bostad_cycle`).
 - **"Genuinely new" without a database:** Qasa home ids are monotonic integers,
   so the newest id seen is the watermark. It's persisted **in Telegram itself**:
   a single pinned "state" message in the chat holds `watermark=<id>`. On boot the
@@ -66,9 +99,13 @@ slugs silently return a country-wide result, so only verified ones are included.
 
 - `BOT_TOKEN` (**secret**, required) — from @BotFather.
 - `CHAT_ID` (**secret**, required) — target chat id (i64).
+- `BOSTAD_CHAT_ID` (**secret**, optional) — chat for Bostad snabbt
+  notifications; unset disables that notifier. Must differ from `CHAT_ID`.
 - `QASA_AREA` (default `se/stockholm`), `HOME_TYPES` (default `apartment`,
   comma-separated), `POLL_INTERVAL_HOURS` (default `3`),
-  `MAX_NOTIFY_PER_CYCLE` (default `40`), `QASA_ENDPOINT`, `RUST_LOG`.
+  `MAX_NOTIFY_PER_CYCLE` (default `40`, shared by both notifiers),
+  `QASA_ENDPOINT`, `BOSTAD_POLL_INTERVAL_MINS` (default `10`),
+  `BOSTAD_ENDPOINT`, `RUST_LOG`.
 
 Non-secret defaults live in `.github/fly.toml [env]` and the image `config.Env`;
 secrets come from `fly secrets set`. Locally, `make run` reads `BOT_TOKEN`/

@@ -63,6 +63,7 @@
                 "QASA_AREA=se/stockholm"
                 "HOME_TYPES=apartment"
                 "POLL_INTERVAL_HOURS=3"
+                "BOSTAD_POLL_INTERVAL_MINS=10"
               ];
             };
           };

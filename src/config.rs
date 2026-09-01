@@ -20,6 +20,13 @@ pub struct Config {
     /// Cap on listings sent in a single cycle; the rest are summarised.
     pub max_notify: usize,
     pub endpoint: String,
+    /// Chat for Bostadsförmedlingen "Bostad snabbt" notifications; unset
+    /// disables that notifier entirely.
+    pub bostad_chat_id: Option<i64>,
+    /// How long to wait between Bostadsförmedlingen polls. Much shorter than
+    /// the Qasa interval: Bostad snabbt ads are first-come-first-served.
+    pub bostad_interval: Duration,
+    pub bostad_endpoint: String,
 }
 
 impl Config {
@@ -47,6 +54,30 @@ impl Config {
 
         let endpoint = optional("QASA_ENDPOINT", "https://api.qasa.com/graphql");
 
+        let bostad_chat_id = match std::env::var("BOSTAD_CHAT_ID") {
+            Ok(v) => Some(
+                v.parse()
+                    .context("BOSTAD_CHAT_ID must be an integer (a Telegram chat id)")?,
+            ),
+            Err(_) => None,
+        };
+        // Each notifier persists its state in *the* pinned message of its chat
+        // (getChat exposes only the most recently pinned one), so sharing a
+        // chat would have the two watermarks overwrite each other.
+        if bostad_chat_id == Some(chat_id) {
+            anyhow::bail!("BOSTAD_CHAT_ID must differ from CHAT_ID: each notifier stores its state in its chat's pinned message");
+        }
+
+        let bostad_mins: u64 = optional("BOSTAD_POLL_INTERVAL_MINS", "10")
+            .parse()
+            .context("BOSTAD_POLL_INTERVAL_MINS must be a positive integer")?;
+        let bostad_interval = Duration::from_secs(bostad_mins.max(1) * 60);
+
+        let bostad_endpoint = optional(
+            "BOSTAD_ENDPOINT",
+            "https://bostad.stockholm.se/AllaAnnonser/",
+        );
+
         Ok(Self {
             bot_token,
             chat_id,
@@ -55,6 +86,9 @@ impl Config {
             interval,
             max_notify,
             endpoint,
+            bostad_chat_id,
+            bostad_interval,
+            bostad_endpoint,
         })
     }
 }

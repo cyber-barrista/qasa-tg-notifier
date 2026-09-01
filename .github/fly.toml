@@ -15,6 +15,7 @@ primary_region = "arn"
   HOME_TYPES = "apartment"
   POLL_INTERVAL_HOURS = "3"
   MAX_NOTIFY_PER_CYCLE = "40"
+  BOSTAD_POLL_INTERVAL_MINS = "10"
 
 [[vm]]
   size = "shared-cpu-1x"

@@ -1,13 +1,17 @@
 //! qasa-tg-notifier: every few hours, poll Qasa's public GraphQL API for
 //! genuinely new Stockholm apartment listings and push them to a Telegram
-//! chat. Also serves an interactive `/search` filter UI.
+//! chat. Optionally also polls Bostadsförmedlingen's feed every few minutes
+//! for new first-come-first-served "Bostad snabbt" ads (a separate chat).
+//! Serves interactive `/search` and `/bostad` filter UIs.
 
+mod bostad;
+mod bostad_search;
 mod config;
 mod qasa;
 mod search;
 mod telegram;
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -31,11 +35,20 @@ const SEARCH_SCAN_MAX: usize = 200;
 const SEND_GAP: Duration = Duration::from_secs(3);
 
 const HELP: &str = "QASA notifier.\n\
-     • /search — open the filter UI (neighborhood, age, rooms, max rent).\n\
-     • I also post new Stockholm apartments automatically every few hours.";
+     • /search — open the Qasa filter UI (neighborhood, age, rooms, max rent).\n\
+     • /bostad — open the Bostadsförmedlingen filter UI (category, kommun, rooms, rent).\n\
+     • I also post new Stockholm apartments automatically every few hours,\n\
+       and new first-come-first-served Bostad snabbt ads every few minutes.";
+
+/// An in-progress filter-UI session: which search a config message belongs to.
+#[derive(Clone)]
+enum Session {
+    Qasa(search::Filters),
+    Bostad(bostad_search::Filters),
+}
 
 /// In-progress search sessions, keyed by (chat_id, config-message_id).
-type Sessions = HashMap<(i64, i32), search::Filters>;
+type Sessions = HashMap<(i64, i32), Session>;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -60,14 +73,32 @@ async fn main() -> Result<()> {
         "starting qasa-tg-notifier"
     );
 
-    // Two independent loops: the periodic notifier and the command listener.
+    // Independent loops: the periodic notifiers and the command listener.
     let notifier = tokio::spawn(notifier_loop(http.clone(), bot.clone(), cfg.clone()));
+    let bostad_notifier = match cfg.bostad_chat_id {
+        Some(chat_id) => {
+            info!(
+                chat_id,
+                interval_secs = cfg.bostad_interval.as_secs(),
+                "bostad snabbt notifier enabled"
+            );
+            tokio::spawn(bostad_notifier_loop(
+                http.clone(),
+                bot.clone(),
+                cfg.clone(),
+                chat_id,
+            ))
+        }
+        // Disabled: park a task that never resolves so the select! below is uniform.
+        None => tokio::spawn(std::future::pending()),
+    };
     let commands = tokio::spawn(command_loop(http, bot, cfg));
 
-    // Neither loop returns in normal operation; if one dies, exit so the
+    // No loop returns in normal operation; if one dies, exit so the
     // container restarts.
     tokio::select! {
         r = notifier => error!("notifier task exited: {r:?}"),
+        r = bostad_notifier => error!("bostad notifier task exited: {r:?}"),
         r = commands => error!("command task exited: {r:?}"),
     }
     Ok(())
@@ -152,6 +183,91 @@ async fn run_cycle(http: &reqwest::Client, bot: &Bot, cfg: &Config) -> Result<()
     Ok(())
 }
 
+/// Poll the Bostadsförmedlingen feed every `cfg.bostad_interval` and push new
+/// "Bostad snabbt" (first-come-first-served) ads.
+async fn bostad_notifier_loop(http: reqwest::Client, bot: Bot, cfg: Config, chat_id: i64) {
+    let mut ticker = tokio::time::interval(cfg.bostad_interval);
+    loop {
+        ticker.tick().await;
+        if let Err(e) = run_bostad_cycle(&http, &bot, &cfg, chat_id).await {
+            error!("bostad cycle failed: {e:#}");
+        }
+    }
+}
+
+/// One Bostad snabbt cycle. Dedup is a seen-id *set* (not a watermark, since
+/// `AnnonsId` is not monotonic with publish date) persisted in the bostad
+/// chat's pinned message; pruning it to live ads keeps it a handful of ids.
+async fn run_bostad_cycle(
+    http: &reqwest::Client,
+    bot: &Bot,
+    cfg: &Config,
+    chat_id: i64,
+) -> Result<()> {
+    let snabbt: Vec<bostad::Ad> = bostad::fetch_all(http, cfg)
+        .await
+        .context("fetching bostad feed")?
+        .into_iter()
+        .filter(|ad| ad.bostad_snabbt)
+        .collect();
+    let live_ids: BTreeSet<u64> = snabbt.iter().map(|ad| ad.annons_id).collect();
+
+    let state = telegram::read_bostad_state(bot, chat_id)
+        .await
+        .context("reading pinned bostad state")?;
+
+    let Some(state) = state else {
+        // First run: record every live ad, notify nothing.
+        telegram::write_bostad_state(bot, chat_id, None, &live_ids).await?;
+        info!(
+            live = live_ids.len(),
+            "seeded bostad state on first run; no notifications sent"
+        );
+        return Ok(());
+    };
+
+    let mut new: Vec<&bostad::Ad> = snabbt
+        .iter()
+        .filter(|ad| !state.seen.contains(&ad.annons_id))
+        .collect();
+    // Oldest-new first, so the chat reads chronologically.
+    new.sort_by_key(|ad| ad.annons_id);
+    let total = new.len();
+    let send_n = total.min(cfg.max_notify);
+
+    for ad in &new[..send_n] {
+        if let Err(e) = telegram::send_bostad_listing(bot, chat_id, ad).await {
+            warn!(id = ad.annons_id, "failed to send bostad listing: {e:#}");
+        }
+        tokio::time::sleep(SEND_GAP).await;
+    }
+    if total > send_n {
+        let more = total - send_n;
+        let _ = telegram::send_note(
+            bot,
+            chat_id,
+            &format!("…and {more} more new ad(s) — sending next cycle."),
+        )
+        .await;
+    }
+
+    // Seen = still-live ads we'd already seen, plus what we just sent. Ads
+    // capped out of this cycle stay unseen and go out next cycle.
+    let mut seen: BTreeSet<u64> = state.seen.intersection(&live_ids).copied().collect();
+    seen.extend(new[..send_n].iter().map(|ad| ad.annons_id));
+    // Skip the write when nothing changed — Telegram rejects a no-op edit.
+    if seen != state.seen {
+        telegram::write_bostad_state(bot, chat_id, Some(state.message_id), &seen).await?;
+    }
+
+    if total > 0 {
+        info!(sent = send_n, total_new = total, "bostad cycle complete");
+    } else {
+        info!("no new bostad snabbt ads");
+    }
+    Ok(())
+}
+
 /// Long-poll `getUpdates` and dispatch commands and button presses.
 async fn command_loop(http: reqwest::Client, bot: Bot, cfg: Config) {
     let mut params = GetUpdatesParams::builder().timeout(30).build();
@@ -192,11 +308,13 @@ async fn command_loop(http: reqwest::Client, bot: Bot, cfg: Config) {
     }
 }
 
-/// Whether the bot serves commands from this chat: the configured group chat
-/// plus any one-on-one (private) chat. Other groups it may get added to are
-/// ignored. Scheduled notifications still go only to `cfg.chat_id`.
+/// Whether the bot serves commands from this chat: the configured chats plus
+/// any one-on-one (private) chat. Other groups it may get added to are
+/// ignored. Scheduled notifications still go only to their configured chat.
 fn chat_allowed(cfg: &Config, chat: &Chat) -> bool {
-    chat.id == cfg.chat_id || chat.type_field == ChatType::Private
+    chat.id == cfg.chat_id
+        || Some(chat.id) == cfg.bostad_chat_id
+        || chat.type_field == ChatType::Private
 }
 
 /// Render a Telegram user for logs, e.g. `Anna (id=123, @anna)`.
@@ -241,9 +359,20 @@ async fn handle_message(
             let (text, keyboard) = search::render(search::Screen::Main, &filters);
             match telegram::send_keyboard(bot, chat_id, &text, keyboard).await {
                 Ok(message) => {
-                    sessions.insert((chat_id, message.message_id), filters);
+                    sessions.insert((chat_id, message.message_id), Session::Qasa(filters));
                 }
                 Err(e) => error!(user = %who, "failed to open search: {e:#}"),
+            }
+        }
+        "/bostad" => {
+            info!(user = %who, command = cmd, "opening bostad search UI");
+            let filters = bostad_search::Filters::default();
+            let (text, keyboard) = bostad_search::render(bostad_search::Screen::Main, &filters);
+            match telegram::send_keyboard(bot, chat_id, &text, keyboard).await {
+                Ok(message) => {
+                    sessions.insert((chat_id, message.message_id), Session::Bostad(filters));
+                }
+                Err(e) => error!(user = %who, "failed to open bostad search: {e:#}"),
             }
         }
         "/start" | "/help" => {
@@ -286,51 +415,87 @@ async fn handle_callback(
     debug!(user = %who, button = data, "button pressed");
 
     let key = (chat_id, message_id);
-    let Some(mut filters) = sessions.get(&key).cloned() else {
+    let Some(session) = sessions.get(&key).cloned() else {
         debug!(user = %who, "callback for expired search session");
         let _ = telegram::edit_plain(
             bot,
             chat_id,
             message_id,
-            "This search expired — send /search to start a new one.",
+            "This search expired — send /search or /bostad to start a new one.",
         )
         .await;
         return;
     };
 
-    match search::apply(&mut filters, data) {
-        search::Action::Show(screen) => {
-            let (text, keyboard) = search::render(screen, &filters);
-            let _ = telegram::edit_keyboard(bot, chat_id, message_id, &text, keyboard).await;
-            sessions.insert(key, filters);
-        }
-        search::Action::Search => {
-            info!(
-                user = %who,
-                age_hours = filters.age_hours,
-                min_rooms = filters.min_rooms,
-                min_rent = ?filters.min_rent,
-                max_rent = ?filters.max_rent,
-                areas = %filters.area_summary(),
-                "search triggered"
-            );
-            sessions.remove(&key);
-            let _ = telegram::edit_plain(
-                bot,
-                chat_id,
-                message_id,
-                &format!("🔎 Searching…\n\n{}", search::describe(&filters)),
-            )
-            .await;
-            tokio::spawn(run_search(
-                http.clone(),
-                bot.clone(),
-                cfg.clone(),
-                chat_id,
-                filters,
-            ));
-        }
-        search::Action::Ignore => {}
+    match session {
+        Session::Qasa(mut filters) => match search::apply(&mut filters, data) {
+            search::Action::Show(screen) => {
+                let (text, keyboard) = search::render(screen, &filters);
+                let _ = telegram::edit_keyboard(bot, chat_id, message_id, &text, keyboard).await;
+                sessions.insert(key, Session::Qasa(filters));
+            }
+            search::Action::Search => {
+                info!(
+                    user = %who,
+                    age_hours = filters.age_hours,
+                    min_rooms = filters.min_rooms,
+                    min_rent = ?filters.min_rent,
+                    max_rent = ?filters.max_rent,
+                    areas = %filters.area_summary(),
+                    "search triggered"
+                );
+                sessions.remove(&key);
+                let _ = telegram::edit_plain(
+                    bot,
+                    chat_id,
+                    message_id,
+                    &format!("🔎 Searching…\n\n{}", search::describe(&filters)),
+                )
+                .await;
+                tokio::spawn(run_search(
+                    http.clone(),
+                    bot.clone(),
+                    cfg.clone(),
+                    chat_id,
+                    filters,
+                ));
+            }
+            search::Action::Ignore => {}
+        },
+        Session::Bostad(mut filters) => match bostad_search::apply(&mut filters, data) {
+            bostad_search::Action::Show(screen) => {
+                let (text, keyboard) = bostad_search::render(screen, &filters);
+                let _ = telegram::edit_keyboard(bot, chat_id, message_id, &text, keyboard).await;
+                sessions.insert(key, Session::Bostad(filters));
+            }
+            bostad_search::Action::Search => {
+                info!(
+                    user = %who,
+                    category = ?filters.category,
+                    min_rooms = filters.min_rooms,
+                    min_rent = ?filters.min_rent,
+                    max_rent = ?filters.max_rent,
+                    kommuner = %filters.kommun_summary(),
+                    "bostad search triggered"
+                );
+                sessions.remove(&key);
+                let _ = telegram::edit_plain(
+                    bot,
+                    chat_id,
+                    message_id,
+                    &format!("🔎 Searching…\n\n{}", bostad_search::describe(&filters)),
+                )
+                .await;
+                tokio::spawn(run_bostad_search(
+                    http.clone(),
+                    bot.clone(),
+                    cfg.clone(),
+                    chat_id,
+                    filters,
+                ));
+            }
+            bostad_search::Action::Ignore => {}
+        },
     }
 }
 
@@ -381,6 +546,67 @@ async fn run_search(
     for home in &matches {
         if let Err(e) = telegram::send_listing(&bot, chat_id, home).await {
             warn!(id = %home.id, "failed to send listing: {e:#}");
+        }
+        tokio::time::sleep(SEND_GAP).await;
+    }
+
+    let note = if total > matches.len() {
+        format!(
+            "✅ {} matches — showing the newest {}.",
+            total,
+            matches.len()
+        )
+    } else {
+        format!("✅ {total} match(es).")
+    };
+    let _ = telegram::send_note(&bot, chat_id, &note).await;
+}
+
+/// Fetch, filter, and post the results of a completed /bostad search.
+async fn run_bostad_search(
+    http: reqwest::Client,
+    bot: Bot,
+    cfg: Config,
+    chat_id: i64,
+    filters: bostad_search::Filters,
+) {
+    let ads = match bostad::fetch_all(&http, &cfg).await {
+        Ok(v) => v,
+        Err(e) => {
+            error!("bostad search fetch failed: {e:#}");
+            let _ = telegram::send_note(&bot, chat_id, "⚠️ Search failed, please try again.").await;
+            return;
+        }
+    };
+
+    let mut matches: Vec<bostad::Ad> = ads
+        .into_iter()
+        .filter(|ad| bostad_search::passes(&filters, ad))
+        .collect();
+    let total = matches.len();
+
+    if total == 0 {
+        info!(kommuner = %filters.kommun_summary(), "bostad search returned no matches");
+        let _ = telegram::send_note(&bot, chat_id, "No matches for those filters.").await;
+        return;
+    }
+
+    // Newest ads have the highest ids; keep the newest, post oldest-first.
+    matches.sort_by_key(|ad| ad.annons_id);
+    if matches.len() > RECENT_MAX_LISTINGS {
+        matches = matches.split_off(matches.len() - RECENT_MAX_LISTINGS);
+    }
+
+    info!(
+        kommuner = %filters.kommun_summary(),
+        total_matches = total,
+        posting = matches.len(),
+        "bostad search complete"
+    );
+
+    for ad in &matches {
+        if let Err(e) = telegram::send_bostad_listing(&bot, chat_id, ad).await {
+            warn!(id = ad.annons_id, "failed to send bostad listing: {e:#}");
         }
         tokio::time::sleep(SEND_GAP).await;
     }

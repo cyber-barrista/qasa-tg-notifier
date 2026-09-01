@@ -17,10 +17,15 @@ use frankenstein::types::{InlineKeyboardButton, InlineKeyboardMarkup, Message, R
 use frankenstein::AsyncTelegramApi;
 use frankenstein::{Error as TgError, ParseMode};
 
+use crate::bostad::Ad;
 use crate::qasa::Home;
 
 /// Marker used to locate the watermark inside the pinned message text.
 const WATERMARK_KEY: &str = "watermark=";
+/// Marker for the Bostadsförmedlingen seen-ids line in its chat's pinned
+/// message. A set rather than a watermark because `AnnonsId` is not monotonic
+/// with publish date; it stays tiny because it's pruned to live ads each cycle.
+const SEEN_KEY: &str = "seen=";
 
 /// How many times to retry a send after a 429 before giving up.
 const MAX_SEND_ATTEMPTS: usize = 5;
@@ -122,6 +127,83 @@ pub async fn write_state(
     Ok(())
 }
 
+/// Parsed contents of the bostad chat's pinned state message.
+pub struct BostadState {
+    pub seen: std::collections::BTreeSet<u64>,
+    pub message_id: i32,
+}
+
+/// Read the seen-ids set from the bostad chat's pinned message, if any.
+pub async fn read_bostad_state(bot: &Bot, chat_id: i64) -> Result<Option<BostadState>> {
+    let params = GetChatParams::builder().chat_id(chat_id).build();
+    let chat = bot
+        .get_chat(&params)
+        .await
+        .context("getChat failed")?
+        .result;
+
+    let Some(pinned) = chat.pinned_message else {
+        return Ok(None);
+    };
+    let Some(text) = pinned.text.as_deref() else {
+        return Ok(None);
+    };
+    let Some(seen) = parse_seen(text) else {
+        return Ok(None);
+    };
+    Ok(Some(BostadState {
+        seen,
+        message_id: pinned.message_id,
+    }))
+}
+
+/// Create-and-pin (first run) or edit-in-place the bostad state message.
+pub async fn write_bostad_state(
+    bot: &Bot,
+    chat_id: i64,
+    existing_message_id: Option<i32>,
+    seen: &std::collections::BTreeSet<u64>,
+) -> Result<()> {
+    let ids: Vec<String> = seen.iter().map(u64::to_string).collect();
+    let text = format!(
+        "📌 bostad-snabbt notifier state\n{SEEN_KEY}{}\nLive Bostad snabbt ad ids already notified — please don't unpin or delete.",
+        ids.join(",")
+    );
+
+    match existing_message_id {
+        Some(message_id) => {
+            let params = EditMessageTextParams::builder()
+                .chat_id(chat_id)
+                .message_id(message_id)
+                .text(text)
+                .build();
+            bot.edit_message_text(&params)
+                .await
+                .context("editing pinned bostad state message")?;
+        }
+        None => {
+            let send = SendMessageParams::builder()
+                .chat_id(chat_id)
+                .text(text)
+                .disable_notification(true)
+                .build();
+            let message = send_message_retrying(bot, &send)
+                .await
+                .context("sending initial bostad state message")?;
+
+            let pin = PinChatMessageParams::builder()
+                .chat_id(chat_id)
+                .message_id(message.message_id)
+                .disable_notification(true)
+                .build();
+            bot.pin_chat_message(&pin)
+                .await
+                .context("pinning bostad state message")?;
+        }
+    }
+    Ok(())
+}
+
 /// Send a single listing as an HTML message with an "Open on Qasa" URL button.
 pub async fn send_listing(bot: &Bot, chat_id: i64, home: &Home) -> Result<()> {
     let open_button = InlineKeyboardButton::builder()
@@ -140,6 +222,27 @@ pub async fn send_listing(bot: &Bot, chat_id: i64, home: &Home) -> Result<()> {
     send_message_retrying(bot, &params)
         .await
         .context("sending listing")?;
+    Ok(())
+}
+
+/// Send a single Bostadsförmedlingen ad as an HTML message with a URL button.
+pub async fn send_bostad_listing(bot: &Bot, chat_id: i64, ad: &Ad) -> Result<()> {
+    let open_button = InlineKeyboardButton::builder()
+        .text("🔗 Open on Bostadsförmedlingen")
+        .url(ad.full_url())
+        .build();
+    let markup = InlineKeyboardMarkup {
+        inline_keyboard: vec![vec![open_button]],
+    };
+    let params = SendMessageParams::builder()
+        .chat_id(chat_id)
+        .text(format_bostad_listing(ad))
+        .parse_mode(ParseMode::Html)
+        .reply_markup(ReplyMarkup::InlineKeyboardMarkup(markup))
+        .build();
+    send_message_retrying(bot, &params)
+        .await
+        .context("sending bostad listing")?;
     Ok(())
 }
 
@@ -224,6 +327,19 @@ fn parse_watermark(text: &str) -> Option<u64> {
     let rest = &text[idx + WATERMARK_KEY.len()..];
     let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
     digits.parse().ok()
+}
+
+/// Parse the comma-separated seen-id set. An empty list (`seen=` alone, the
+/// state after every live ad expires) is valid and distinct from "no state".
+fn parse_seen(text: &str) -> Option<std::collections::BTreeSet<u64>> {
+    let idx = text.find(SEEN_KEY)?;
+    let rest = &text[idx + SEEN_KEY.len()..];
+    let line = rest.lines().next().unwrap_or("");
+    Some(
+        line.split(',')
+            .filter_map(|s| s.trim().parse().ok())
+            .collect(),
+    )
 }
 
 /// Escape the five characters that matter for Telegram's HTML parse mode.
@@ -316,6 +432,94 @@ fn listing_url(home: &Home) -> String {
     format!("https://qasa.com/se/en/home/{}", home.id)
 }
 
+fn format_bostad_listing(ad: &Ad) -> String {
+    let headline = ad
+        .gatuadress
+        .clone()
+        .or_else(|| ad.stadsdel.clone())
+        .unwrap_or_else(|| "Apartment".to_string());
+    // Append the district/kommun where they add information.
+    let mut place = Vec::new();
+    if let Some(stadsdel) = &ad.stadsdel {
+        if *stadsdel != headline {
+            place.push(stadsdel.clone());
+        }
+    }
+    if let Some(kommun) = &ad.kommun {
+        if !place.contains(kommun) {
+            place.push(kommun.clone());
+        }
+    }
+
+    let mut lines = Vec::new();
+    if place.is_empty() {
+        lines.push(format!("🏠 <b>{}</b>", esc(&headline)));
+    } else {
+        lines.push(format!(
+            "🏠 <b>{}</b>, {}",
+            esc(&headline),
+            esc(&place.join(", "))
+        ));
+    }
+
+    if let Some(rent) = ad.rent() {
+        lines.push(format!("💰 {rent} SEK/mo"));
+    }
+
+    let mut size = String::new();
+    if let Some(sqm) = ad.sqm() {
+        size.push_str(&format!("📐 {} m²", fmt_num(sqm)));
+    }
+    if let Some(rooms) = ad.antal_rum {
+        if !size.is_empty() {
+            size.push_str(" · ");
+        } else {
+            size.push_str("📐 ");
+        }
+        size.push_str(&format!("{} rooms", fmt_num(rooms)));
+    }
+    if !size.is_empty() {
+        lines.push(size);
+    }
+
+    let mut tags = Vec::new();
+    if ad.bostad_snabbt {
+        tags.push("⚡ Bostad snabbt — first come, first served".to_string());
+    }
+    if ad.student {
+        tags.push("student".to_string());
+    }
+    if ad.ungdom {
+        tags.push("ungdom".to_string());
+    }
+    if ad.senior {
+        tags.push("senior".to_string());
+    }
+    if ad.korttid {
+        tags.push("short-term".to_string());
+    }
+    // "Short queue time" only means something for queue-allocated ads.
+    if ad.kort_kotid && !ad.bostad_snabbt {
+        tags.push("short queue".to_string());
+    }
+    if ad.nyproduktion {
+        tags.push("new build".to_string());
+    }
+    if let Some(t) = &ad.lagenhetstyp {
+        tags.push(esc(t));
+    }
+    if !tags.is_empty() {
+        lines.push(format!("🏷 {}", tags.join(" · ")));
+    }
+
+    // These ads close quickly, so the deadline matters.
+    if let Some(till) = &ad.annonserad_till {
+        lines.push(format!("⏰ apply by {}", esc(till)));
+    }
+
+    lines.join("\n")
+}
+
 /// Render a possibly-fractional number without a trailing `.0`.
 fn fmt_num(n: f64) -> String {
     if (n.fract()).abs() < f64::EPSILON {
@@ -339,6 +543,55 @@ mod tests {
     #[test]
     fn missing_watermark_is_none() {
         assert_eq!(parse_watermark("no marker here"), None);
+    }
+
+    #[test]
+    fn parses_seen_set_from_state_text() {
+        let text = "📌 bostad-snabbt notifier state\nseen=301449,301581,301744\nfoo";
+        let seen = parse_seen(text).unwrap();
+        assert_eq!(seen.len(), 3);
+        assert!(seen.contains(&301_449));
+        // An empty list is valid state (all live ads expired), not "no state".
+        assert_eq!(parse_seen("seen=\nrest"), Some(Default::default()));
+        assert_eq!(parse_seen("no marker here"), None);
+    }
+
+    #[test]
+    fn formats_bostad_listing() {
+        let ad = crate::bostad::Ad {
+            annons_id: 301_449,
+            gatuadress: Some("Njupkärrsvägen 5".to_string()),
+            stadsdel: Some("Bollmora".to_string()),
+            kommun: Some("Tyresö".to_string()),
+            antal_rum: Some(1.0),
+            yta: Some(33.0),
+            hyra: Some(9_074),
+            lagsta_hyran: None,
+            hogsta_hyran: None,
+            lagsta_ytan: None,
+            hogsta_ytan: None,
+            annonserad_till: Some("2026-09-03".to_string()),
+            url: Some("/bostad/202615120/".to_string()),
+            lagenhetstyp: Some("Hyresrätt".to_string()),
+            nyproduktion: true,
+            student: false,
+            ungdom: false,
+            senior: false,
+            korttid: false,
+            vanlig: false,
+            bostad_snabbt: true,
+            kort_kotid: false,
+        };
+        let out = format_bostad_listing(&ad);
+        assert!(out.contains("<b>Njupkärrsvägen 5</b>, Bollmora, Tyresö"));
+        assert!(out.contains("9074 SEK/mo"));
+        assert!(out.contains("33 m² · 1 rooms"));
+        assert!(out.contains("Bostad snabbt"));
+        assert!(out.contains("apply by 2026-09-03"));
+        assert_eq!(
+            ad.full_url(),
+            "https://bostad.stockholm.se/bostad/202615120/"
+        );
     }
 
     #[test]

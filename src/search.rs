@@ -350,7 +350,7 @@ fn main_text(f: &Filters) -> String {
     )
 }
 
-fn button(text: String, data: &str) -> InlineKeyboardButton {
+pub(crate) fn button(text: String, data: &str) -> InlineKeyboardButton {
     InlineKeyboardButton::builder()
         .text(text)
         .callback_data(data.to_string())
@@ -358,7 +358,7 @@ fn button(text: String, data: &str) -> InlineKeyboardButton {
 }
 
 /// Mark the selected option with a leading dot.
-fn mark(selected: bool, text: &str) -> String {
+pub(crate) fn mark(selected: bool, text: &str) -> String {
     if selected {
         format!("• {text}")
     } else {
@@ -367,7 +367,7 @@ fn mark(selected: bool, text: &str) -> String {
 }
 
 /// Lay buttons out `per_row` wide and append a Back row.
-fn menu(buttons: Vec<InlineKeyboardButton>, per_row: usize) -> InlineKeyboardMarkup {
+pub(crate) fn menu(buttons: Vec<InlineKeyboardButton>, per_row: usize) -> InlineKeyboardMarkup {
     let mut inline_keyboard: Vec<Vec<InlineKeyboardButton>> = buttons
         .chunks(per_row)
         .map(<[InlineKeyboardButton]>::to_vec)
