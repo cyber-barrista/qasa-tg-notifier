@@ -17,6 +17,10 @@ const ROOMS: [u8; 6] = [0, 1, 2, 3, 4, 5];
 const RENTS: [i64; 11] = [
     0, 5_000, 6_000, 7_000, 8_000, 9_000, 10_000, 12_000, 15_000, 18_000, 22_000,
 ];
+/// Max-queue-years presets; `0` means "any". Compared against the Q1 (25th
+/// percentile) of queue times among recently rented similar flats — the
+/// optimistic "with this many years you have a shot" bound.
+const QUEUE_YEARS: [i64; 8] = [0, 1, 2, 3, 4, 5, 7, 10];
 
 /// Ad category, matched against the feed's per-ad booleans.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -127,6 +131,8 @@ pub struct Filters {
     /// Min/max monthly rent in SEK; None = any.
     pub min_rent: Option<i64>,
     pub max_rent: Option<i64>,
+    /// Max queue years (matched against the ad's Q1 stat); None = any.
+    pub max_queue_years: Option<i64>,
 }
 
 impl Default for Filters {
@@ -137,6 +143,7 @@ impl Default for Filters {
             min_rooms: 0,
             min_rent: None,
             max_rent: None,
+            max_queue_years: None,
         }
     }
 }
@@ -174,6 +181,7 @@ pub enum Screen {
     Rooms,
     MinRent,
     MaxRent,
+    Queue,
     Kommun,
 }
 
@@ -196,6 +204,7 @@ pub fn apply(filters: &mut Filters, data: &str) -> Action {
         "menu:rooms" => return Action::Show(Screen::Rooms),
         "menu:minrent" => return Action::Show(Screen::MinRent),
         "menu:maxrent" => return Action::Show(Screen::MaxRent),
+        "menu:queue" => return Action::Show(Screen::Queue),
         "menu:kommun" => return Action::Show(Screen::Kommun),
         "kommunclear" => {
             filters.kommuner.clear();
@@ -230,6 +239,14 @@ pub fn apply(filters: &mut Filters, data: &str) -> Action {
         "maxrent" => {
             if let Ok(v) = val.parse::<i64>() {
                 filters.max_rent = (v > 0).then_some(v);
+            }
+            Action::Show(Screen::Main)
+        }
+        "queue" => {
+            if let Ok(v) = val.parse::<i64>() {
+                if QUEUE_YEARS.contains(&v) {
+                    filters.max_queue_years = (v > 0).then_some(v);
+                }
             }
             Action::Show(Screen::Main)
         }
@@ -276,6 +293,17 @@ pub fn passes(filters: &Filters, ad: &Ad) -> bool {
             _ => return false,
         }
     }
+    // Q1 of recent comparable lettings ≤ max means someone with that little
+    // queue time recently got a similar flat. Snabbt ads bypass the queue
+    // entirely, so they always pass.
+    if let Some(max) = filters.max_queue_years {
+        if !ad.bostad_snabbt {
+            match ad.queue_q1() {
+                Some(q1) if q1 <= max => {}
+                _ => return false,
+            }
+        }
+    }
     true
 }
 
@@ -296,6 +324,12 @@ pub fn render(screen: Screen, filters: &Filters) -> (String, InlineKeyboardMarku
             "💰 Maximum rent (SEK / month):".to_string(),
             rent_keyboard(filters.max_rent, "maxrent"),
         ),
+        Screen::Queue => (
+            "⏳ Max queue years — keep ads where people with this little queue \
+             time recently got a similar flat (Bostad snabbt ads always pass):"
+                .to_string(),
+            queue_keyboard(filters),
+        ),
         Screen::Kommun => (
             "📍 Tap kommuner to toggle (none selected = whole region):".to_string(),
             kommun_keyboard(filters),
@@ -306,12 +340,13 @@ pub fn render(screen: Screen, filters: &Filters) -> (String, InlineKeyboardMarku
 /// A multi-line summary of the active filters, for the "Searching…" message.
 pub fn describe(f: &Filters) -> String {
     format!(
-        "🗂 Category: {}\n📍 Kommun: {}\n🛏 Rooms: {}\n💰 Rent: {}–{}",
+        "🗂 Category: {}\n📍 Kommun: {}\n🛏 Rooms: {}\n💰 Rent: {}–{}\n⏳ Max queue: {}",
         f.category.label(),
         f.kommun_summary(),
         rooms_text(f.min_rooms),
         rent_text(f.min_rent),
         rent_text(f.max_rent),
+        queue_text(f.max_queue_years),
     )
 }
 
@@ -330,13 +365,21 @@ fn rent_text(rent: Option<i64>) -> String {
     }
 }
 
+fn queue_text(years: Option<i64>) -> String {
+    match years {
+        None => "any".to_string(),
+        Some(v) => format!("≤{v} yrs"),
+    }
+}
+
 fn main_text(f: &Filters) -> String {
     format!(
-        "🔍 Search Bostadsförmedlingen ads\n\n🗂 Category: {}\n🛏 Rooms: {}\n💰 Rent: {}–{}\n📍 Kommun: {}\n\nTap a field to change it, then Search.",
+        "🔍 Search Bostadsförmedlingen ads\n\n🗂 Category: {}\n🛏 Rooms: {}\n💰 Rent: {}–{}\n⏳ Max queue: {}\n📍 Kommun: {}\n\nTap a field to change it, then Search.",
         f.category.label(),
         rooms_text(f.min_rooms),
         rent_text(f.min_rent),
         rent_text(f.max_rent),
+        queue_text(f.max_queue_years),
         f.kommun_summary(),
     )
 }
@@ -359,6 +402,10 @@ fn main_keyboard(f: &Filters) -> InlineKeyboardMarkup {
         vec![button(
             format!("💰 Max rent: {}", rent_text(f.max_rent)),
             "menu:maxrent",
+        )],
+        vec![button(
+            format!("⏳ Max queue: {}", queue_text(f.max_queue_years)),
+            "menu:queue",
         )],
         vec![button(
             format!("📍 Kommun: {}", f.kommun_summary()),
@@ -412,6 +459,24 @@ fn rent_keyboard(selected: Option<i64>, prefix: &str) -> InlineKeyboardMarkup {
     menu(buttons, 3)
 }
 
+fn queue_keyboard(f: &Filters) -> InlineKeyboardMarkup {
+    let buttons = QUEUE_YEARS
+        .iter()
+        .map(|v| {
+            let text = if *v == 0 {
+                "Any".to_string()
+            } else {
+                format!("≤{v} yrs")
+            };
+            button(
+                mark(f.max_queue_years.unwrap_or(0) == *v, &text),
+                &format!("queue:{v}"),
+            )
+        })
+        .collect();
+    menu(buttons, 4)
+}
+
 /// Multi-select kommun picker: a toggle grid plus Clear / Done controls.
 fn kommun_keyboard(f: &Filters) -> InlineKeyboardMarkup {
     let mut inline_keyboard: Vec<Vec<InlineKeyboardButton>> = Kommun::ALL
@@ -462,7 +527,16 @@ mod tests {
             vanlig: !snabbt,
             bostad_snabbt: snabbt,
             kort_kotid: false,
+            liknade_lagenhet_statistik: None,
         }
+    }
+
+    fn with_queue(mut a: Ad, q1: i64) -> Ad {
+        a.liknade_lagenhet_statistik = Some(crate::bostad::KotidStatistik {
+            kotid_fordelning_q1: Some(q1),
+            kotid_fordelning_q3: Some(q1 + 3),
+        });
+        a
     }
 
     #[test]
@@ -482,6 +556,35 @@ mod tests {
             ..Filters::default()
         };
         assert!(passes(&all, &ad(false, "Tyresö", None, None)));
+    }
+
+    #[test]
+    fn queue_filter_uses_q1_and_skips_snabbt() {
+        let mut f = Filters {
+            category: Category::All,
+            ..Filters::default()
+        };
+        assert!(matches!(
+            apply(&mut f, "queue:3"),
+            Action::Show(Screen::Main)
+        ));
+        assert_eq!(f.max_queue_years, Some(3));
+
+        assert!(passes(&f, &with_queue(ad(false, "Nacka", None, None), 3)));
+        assert!(!passes(&f, &with_queue(ad(false, "Nacka", None, None), 4)));
+        // Queue-allocated ads with no stats are excluded when the filter is set…
+        assert!(!passes(&f, &ad(false, "Nacka", None, None)));
+        // …but snabbt ads bypass the queue and always pass.
+        assert!(passes(&f, &with_queue(ad(true, "Nacka", None, None), 10)));
+        assert!(passes(&f, &ad(true, "Nacka", None, None)));
+
+        // "Any" clears the filter.
+        assert!(matches!(
+            apply(&mut f, "queue:0"),
+            Action::Show(Screen::Main)
+        ));
+        assert_eq!(f.max_queue_years, None);
+        assert!(passes(&f, &ad(false, "Nacka", None, None)));
     }
 
     #[test]

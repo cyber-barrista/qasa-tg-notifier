@@ -36,7 +36,7 @@ const SEND_GAP: Duration = Duration::from_secs(3);
 
 const HELP: &str = "QASA notifier.\n\
      • /search — open the Qasa filter UI (neighborhood, age, rooms, max rent).\n\
-     • /bostad — open the Bostadsförmedlingen filter UI (category, kommun, rooms, rent).\n\
+     • /bostad — open the Bostadsförmedlingen filter UI (category, kommun, rooms, rent, queue years).\n\
      • I also post new Stockholm apartments automatically every few hours,\n\
        and new first-come-first-served Bostad snabbt ads every few minutes.";
 
@@ -475,6 +475,7 @@ async fn handle_callback(
                     min_rooms = filters.min_rooms,
                     min_rent = ?filters.min_rent,
                     max_rent = ?filters.max_rent,
+                    max_queue_years = ?filters.max_queue_years,
                     kommuner = %filters.kommun_summary(),
                     "bostad search triggered"
                 );

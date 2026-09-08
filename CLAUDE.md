@@ -37,8 +37,13 @@ listings and pushes each new one to a Telegram chat. The query sets
 - **`/bostad`** — same filter-UI pattern (`bostad_search::{Screen, render, apply,
   passes}`) over the **Bostadsförmedlingen** feed: category (⚡ Bostad snabbt /
   student / regular / all), kommun multi-select (25 kommuner, labels matched
-  verbatim against the feed's `Kommun` strings), min rooms, min/max rent. The
-  whole feed is one JSON array, so all filters are client-side. Sessions for
+  verbatim against the feed's `Kommun` strings), min rooms, min/max rent, and
+  max queue years. The queue filter compares against the feed's
+  `LiknadeLagenhetStatistik.KotidFordelningQ1` (25th percentile of queue years
+  among recently rented similar flats — there is no per-ad "required" figure,
+  allocation just goes to the longest-queued applicant); snabbt ads bypass the
+  queue and always pass it. The whole feed is one JSON array, so all filters
+  are client-side. Sessions for
   both UIs share one map via the `Session` enum in `main.rs`.
 - **`/start` / `/help`** — usage. Commands are honored from the configured
   `CHAT_ID`, from `BOSTAD_CHAT_ID`, and from any private (direct-message) chat;

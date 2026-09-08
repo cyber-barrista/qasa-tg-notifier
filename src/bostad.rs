@@ -65,6 +65,18 @@ pub struct Ad {
     pub bostad_snabbt: bool,
     #[serde(default, rename = "KortKotid")]
     pub kort_kotid: bool,
+    /// Queue-time quartiles (in years) of recently rented *similar* flats —
+    /// the closest thing the feed has to "queue years required".
+    #[serde(default, rename = "LiknadeLagenhetStatistik")]
+    pub liknade_lagenhet_statistik: Option<KotidStatistik>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct KotidStatistik {
+    #[serde(default, rename = "KotidFordelningQ1")]
+    pub kotid_fordelning_q1: Option<i64>,
+    #[serde(default, rename = "KotidFordelningQ3")]
+    pub kotid_fordelning_q3: Option<i64>,
 }
 
 impl Ad {
@@ -76,6 +88,21 @@ impl Ad {
     /// Living area in m², with the same single-then-range fallback as `rent`.
     pub fn sqm(&self) -> Option<f64> {
         self.yta.or(self.hogsta_ytan).or(self.lagsta_ytan)
+    }
+
+    /// Optimistic queue-years estimate: the 25th percentile of queue times
+    /// among recent comparable lettings.
+    pub fn queue_q1(&self) -> Option<i64> {
+        self.liknade_lagenhet_statistik
+            .as_ref()
+            .and_then(|s| s.kotid_fordelning_q1)
+    }
+
+    /// Pessimistic counterpart of [`Ad::queue_q1`] (75th percentile).
+    pub fn queue_q3(&self) -> Option<i64> {
+        self.liknade_lagenhet_statistik
+            .as_ref()
+            .and_then(|s| s.kotid_fordelning_q3)
     }
 
     /// Absolute listing page URL.
@@ -117,6 +144,7 @@ mod tests {
         "Senior": false, "Korttid": false, "Vanlig": true,
         "Bostadssnabben": false, "BostadSnabbt": false,
         "Lagenhetstyp": "Hyresrätt", "KortKotid": false,
+        "LiknadeLagenhetStatistik": { "KotidFordelningQ1": 2, "KotidFordelningQ3": 4 },
         "LägstaHyran": 8570, "HögstaHyran": 10165,
         "LägstaYtan": 26, "HögstaYtan": 35
       },
@@ -141,6 +169,8 @@ mod tests {
         assert_eq!(project.sqm(), Some(35.0));
         assert!(!project.bostad_snabbt);
         assert!(project.vanlig);
+        assert_eq!(project.queue_q1(), Some(2));
+        assert_eq!(project.queue_q3(), Some(4));
 
         // Fast-track ad: single-unit fields win.
         let snabbt = &ads[1];
@@ -151,7 +181,9 @@ mod tests {
             snabbt.full_url(),
             "https://bostad.stockholm.se/bostad/202615120/"
         );
-        // Absent booleans default to false rather than failing the parse.
+        // Absent booleans default to false rather than failing the parse,
+        // and absent stats to None.
         assert!(!snabbt.student);
+        assert_eq!(snabbt.queue_q1(), None);
     }
 }

@@ -512,6 +512,18 @@ fn format_bostad_listing(ad: &Ad) -> String {
         lines.push(format!("🏷 {}", tags.join(" · ")));
     }
 
+    // Queue-years range of recent comparable lettings; meaningless for the
+    // first-come-first-served snabbt ads.
+    if !ad.bostad_snabbt {
+        match (ad.queue_q1(), ad.queue_q3()) {
+            (Some(q1), Some(q3)) if q1 != q3 => {
+                lines.push(format!("⏳ queue ~{q1}–{q3} yrs"));
+            }
+            (Some(q1), _) => lines.push(format!("⏳ queue ~{q1} yrs")),
+            _ => {}
+        }
+    }
+
     // These ads close quickly, so the deadline matters.
     if let Some(till) = &ad.annonserad_till {
         lines.push(format!("⏰ apply by {}", esc(till)));
@@ -581,11 +593,21 @@ mod tests {
             vanlig: false,
             bostad_snabbt: true,
             kort_kotid: false,
+            liknade_lagenhet_statistik: Some(crate::bostad::KotidStatistik {
+                kotid_fordelning_q1: Some(2),
+                kotid_fordelning_q3: Some(4),
+            }),
         };
         let out = format_bostad_listing(&ad);
         assert!(out.contains("<b>Njupkärrsvägen 5</b>, Bollmora, Tyresö"));
         assert!(out.contains("9074 SEK/mo"));
         assert!(out.contains("33 m² · 1 rooms"));
+        // Snabbt ads bypass the queue, so their stats are not shown…
+        assert!(!out.contains("queue ~"));
+        // …but queue-allocated ads show the range.
+        let mut regular = ad.clone();
+        regular.bostad_snabbt = false;
+        assert!(format_bostad_listing(&regular).contains("⏳ queue ~2–4 yrs"));
         assert!(out.contains("Bostad snabbt"));
         assert!(out.contains("apply by 2026-09-03"));
         assert_eq!(
