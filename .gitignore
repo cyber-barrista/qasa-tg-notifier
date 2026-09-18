@@ -1,6 +1,8 @@
 target/
 result
-.claude/
+.claude/*
+!.claude/skills/
+.qasa-hunt/
 .idea/
 .direnv/
 .env

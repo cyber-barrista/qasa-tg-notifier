@@ -192,6 +192,30 @@ secrets come from `fly secrets set`. Locally, `make run` reads `BOT_TOKEN`/
   `fly apps create qasa-tg-notifier`, set `FLY_API_TOKEN` repo secret from
   `fly tokens create deploy`.
 
+## Apartment-hunting skill (`.claude/skills/qasa-hunt`)
+
+A project skill that reuses the same GraphQL endpoint for the *user's own*
+flat hunt, unrelated to the notifier binary: questionnaire → search →
+applicant-profile questionnaire → one tailored application message per
+listing → a local results page served over http.
+
+- `SKILL.md` documents the endpoint in detail — including the two fields the
+  Rust client doesn't ask for (`description`, `location.point { lat lon }`),
+  that introspection is disabled but error messages name valid fields, and
+  the `publishedAt` vs `publishedOrBumpedAt` paging rule.
+- `search.py` (fetch/filter/rank, via `gql`) and `render.py` (Jinja2 render of
+  `template.html.j2`) run in **`devShells.skills`** — `nix develop .#skills`,
+  a `python3.withPackages` carrying gql/requests/requests-toolbelt/jinja2.
+  It's deliberately separate from the Rust shell, which shares none of those
+  deps. `make hunt` serves the result from that shell with
+  `python3 -m http.server`.
+- Working files land in `.qasa-hunt/` (gitignored). `.gitignore` ignores
+  `.claude/*` but un-ignores `.claude/skills/`, so the skill is committed
+  while `settings.local.json` stays out.
+- The message-writing guidance in `SKILL.md` is derived from counting tenant
+  requirements across 400 live Stockholm ads — the frequency table is the
+  evidence, don't replace it with guesses.
+
 ## Conventions
 
 - `flake.lock` pins everything; `Cargo.lock` must be committed (the nix build

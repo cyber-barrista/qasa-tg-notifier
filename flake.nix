@@ -30,6 +30,16 @@
           ];
         };
 
+        # Interpreter for the .claude/skills tooling. Kept out of the Rust
+        # dev shell: it shares none of its dependencies and would drag a
+        # Python closure into every `nix develop` for the binary.
+        skillsPython = pkgs.python3.withPackages (ps: with ps; [
+          gql                # GraphQL client (parses/validates the document)
+          requests           # gql's sync HTTP transport
+          requests-toolbelt  # ditto — gql's RequestsHTTPTransport needs it
+          jinja2             # HTML templating for the results page
+        ]);
+
         mkQasa = p: p.rustPlatform.buildRustPackage {
           pname = "qasa-tg-notifier";
           version = "0.1.0";
@@ -84,6 +94,13 @@
           ];
 
           env.RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
+        };
+
+        # `nix develop .#skills` — the tooling behind .claude/skills/qasa-hunt
+        # (GraphQL search, page rendering, and `python3 -m http.server` to
+        # serve the result). Nothing here is needed to build the binary.
+        devShells.skills = pkgs.mkShell {
+          packages = [ skillsPython ];
         };
       });
 }

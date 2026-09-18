@@ -1,0 +1,370 @@
+{#
+  Results page for the `qasa-hunt` skill. Rendered by render.py with Jinja2
+  (autoescaping on — listing text is landlord-written, never trusted markup).
+
+  Cards are rendered server-side; the JavaScript only reorders, filters and
+  remembers follow-up state, so the page is readable even if it never runs.
+  Context: generated_at, stats, query, brief[], profile, listings[].
+#}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Qasa hunt — results</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Ctext y=%2726%27 font-size=%2726%27%3E%F0%9F%94%91%3C/text%3E%3C/svg%3E">
+<style>
+  :root {
+    --bg: #f6f6f4; --surface: #fff; --surface-2: #f0efec; --line: #e2e0da;
+    --ink: #1c1b18; --ink-2: #57544c; --ink-3: #8a867c;
+    --accent: #1f6f5c; --accent-ink: #fff;
+    --good: #1f6f5c; --warn: #9a6114; --cool: #2b5f8f;
+    --radius: 12px;
+    --shadow: 0 1px 2px rgba(0,0,0,.05), 0 6px 16px -10px rgba(0,0,0,.18);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16171a; --surface: #1e2024; --surface-2: #26282d; --line: #33363c;
+      --ink: #eceae6; --ink-2: #b1aea7; --ink-3: #85827b;
+      --accent: #4bbf9e; --accent-ink: #10221c;
+      --good: #4bbf9e; --warn: #d9a441; --cool: #74aade;
+      --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 20px -12px rgba(0,0,0,.7);
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.55 ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 28px 20px 96px; }
+
+  header h1 { margin: 0 0 6px; font-size: 22px; letter-spacing: -.01em; }
+  header .sub { color: var(--ink-2); font-size: 13.5px; margin: 0; }
+  .brief {
+    margin: 18px 0 0; padding: 14px 16px; background: var(--surface);
+    border: 1px solid var(--line); border-radius: var(--radius);
+    display: flex; flex-wrap: wrap; gap: 8px 22px;
+  }
+  .brief div { font-size: 13px; }
+  .brief b { display: block; color: var(--ink-3); font-weight: 600;
+             text-transform: uppercase; letter-spacing: .05em; font-size: 10.5px; }
+
+  .toolbar {
+    position: sticky; top: 0; z-index: 5; margin: 20px 0 18px;
+    padding: 12px 14px; background: color-mix(in srgb, var(--bg) 88%, transparent);
+    backdrop-filter: blur(8px); border: 1px solid var(--line);
+    border-radius: var(--radius); display: flex; flex-wrap: wrap;
+    gap: 10px; align-items: center;
+  }
+  .toolbar label { font-size: 12.5px; color: var(--ink-2); }
+  select, input[type=search], textarea, button {
+    font: inherit; color: var(--ink); background: var(--surface);
+    border: 1px solid var(--line); border-radius: 8px; padding: 6px 9px;
+  }
+  input[type=search] { min-width: 190px; }
+  button { cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  .counts { margin-left: auto; display: flex; gap: 6px; }
+  .pill {
+    font-size: 12px; padding: 3px 9px; border-radius: 999px;
+    border: 1px solid var(--line); background: var(--surface); color: var(--ink-2);
+  }
+  .pill b { color: var(--ink); }
+
+  .card {
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: var(--radius); box-shadow: var(--shadow);
+    margin-bottom: 16px; overflow: hidden;
+  }
+  .card[data-status="sent"]     { border-left: 4px solid var(--cool); }
+  .card[data-status="viewing"]  { border-left: 4px solid var(--good); }
+  .card[data-status="rejected"] { opacity: .45; border-left: 4px solid var(--line); }
+
+  .chead {
+    display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 14px;
+    padding: 14px 18px; border-bottom: 1px solid var(--line);
+    background: linear-gradient(var(--surface-2), var(--surface));
+  }
+  .rank { font-variant-numeric: tabular-nums; color: var(--ink-3);
+          font-size: 13px; font-weight: 700; min-width: 22px; }
+  .addr { font-size: 16.5px; font-weight: 650; letter-spacing: -.01em; }
+  .addr span { color: var(--ink-2); font-weight: 400; }
+  .price { margin-left: auto; text-align: right; }
+  .price b { font-size: 19px; font-variant-numeric: tabular-nums; }
+  .price i { display: block; font-style: normal; font-size: 12px; color: var(--ink-3); }
+  .value {
+    font-variant-numeric: tabular-nums; font-weight: 700; font-size: 13px;
+    color: var(--accent-ink); background: var(--accent);
+    padding: 3px 9px; border-radius: 999px;
+  }
+
+  .cbody { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1.15fr);
+           align-items: start; }
+  @media (max-width: 860px) { .cbody { grid-template-columns: 1fr; } }
+  .left { padding: 16px 18px; border-right: 1px solid var(--line); }
+  @media (max-width: 860px) { .left { border-right: 0; border-bottom: 1px solid var(--line); } }
+  .right { padding: 16px 18px; display: flex; flex-direction: column; gap: 10px; }
+
+  .facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(84px, 1fr));
+           gap: 10px 14px; margin: 0 0 14px; }
+  .facts div b { display: block; font-size: 10.5px; text-transform: uppercase;
+                 letter-spacing: .05em; color: var(--ink-3); font-weight: 600; }
+  .facts div span { font-size: 14px; font-variant-numeric: tabular-nums; }
+
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+  .chip { font-size: 11.5px; padding: 2.5px 8px; border-radius: 6px;
+          border: 1px solid var(--line); background: var(--surface-2); color: var(--ink-2); }
+  .chip.req { border-color: color-mix(in srgb, var(--warn) 45%, var(--line)); color: var(--warn); }
+
+  .quote { margin: 0 0 10px; padding: 9px 12px; border-left: 3px solid var(--line);
+           background: var(--surface-2); border-radius: 0 8px 8px 0;
+           font-size: 12.5px; color: var(--ink-2); }
+  .quote p { margin: 0 0 6px; } .quote p:last-child { margin: 0; }
+
+  details { font-size: 13px; }
+  details summary { cursor: pointer; color: var(--ink-2); font-size: 12.5px;
+                    user-select: none; }
+  details pre { white-space: pre-wrap; font: inherit; color: var(--ink-2);
+                max-height: 340px; overflow: auto; margin: 8px 0 0;
+                padding: 10px 12px; background: var(--surface-2); border-radius: 8px; }
+
+  .hook { font-size: 13px; color: var(--ink-2); margin: 0; }
+  .hook b { color: var(--ink); font-weight: 600; }
+  .nomsg { font-size: 13px; color: var(--warn); margin: 0; }
+  textarea.msg {
+    width: 100%; min-height: 330px; resize: vertical; line-height: 1.5;
+    field-sizing: content;
+    font-size: 13.5px; background: var(--surface-2); border-radius: 8px; padding: 12px;
+  }
+  .actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .actions .grow { flex: 1; }
+  .copy { background: var(--accent); color: var(--accent-ink); border-color: transparent;
+          font-weight: 600; padding: 7px 14px; }
+  .copy:hover { filter: brightness(1.07); border-color: transparent; }
+  a.open { color: var(--accent); text-decoration: none; font-size: 13px; font-weight: 600; }
+  a.open:hover { text-decoration: underline; }
+  .status { display: flex; gap: 4px; }
+  .status button { font-size: 12px; padding: 4px 10px; color: var(--ink-2); }
+  .status button[aria-pressed="true"] {
+    background: var(--ink); color: var(--bg); border-color: var(--ink); font-weight: 600; }
+  .notes { width: 100%; min-height: 34px; font-size: 12.5px; }
+
+  .empty { padding: 60px 20px; text-align: center; color: var(--ink-3); }
+  footer { margin-top: 28px; font-size: 12px; color: var(--ink-3); }
+  footer code { background: var(--surface-2); padding: 1px 5px; border-radius: 4px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Qasa hunt</h1>
+    <p class="sub">
+      {{ stats.matched }} match of {{ stats.scanned }} listings scanned{% if stats.live_total %}
+      ({{ stats.live_total }} live in this area){% endif %} ·
+      generated {{ generated_at | stamp }}
+    </p>
+    <div class="brief">
+      <div><b>Window</b>{{ query.days | num }} days</div>
+      <div><b>Budget</b>{% if query.min_cost %}{{ query.min_cost | kr }}–{% else %}up to {% endif %}{{ (query.max_cost | kr) if query.max_cost else "any" }}</div>
+      <div><b>Radius</b>{{ ("≤ " ~ (query.max_km | num) ~ " km from centre") if query.max_km else "any" }}</div>
+      <div><b>Min rooms</b>{{ (query.min_rooms | num) if query.min_rooms else "any" }}</div>
+      <div><b>Min size</b>{{ ((query.min_sqm | num) ~ " m²") if query.min_sqm else "any" }}</div>
+      <div><b>Furnished</b>{{ "either" if query.furnished == "any" else query.furnished }}</div>
+      <div><b>Min term</b>{{ ((query.min_term_months | num) ~ " mo") if query.min_term_months else "any" }}</div>
+      <div><b>Areas</b>{{ query.areas | join(", ") }}</div>
+      {%- for item in brief %}
+      <div><b>{{ item.label }}</b>{{ item.value }}</div>
+      {%- endfor %}
+    </div>
+  </header>
+
+  <div class="toolbar">
+    <label>Sort
+      <select id="sort">
+        <option value="value">Best value (kr/m²)</option>
+        <option value="cost">Cheapest total</option>
+        <option value="km">Closest to centre</option>
+        <option value="pub">Newest</option>
+        <option value="sqm">Biggest</option>
+      </select>
+    </label>
+    <label>Show
+      <select id="filter">
+        <option value="open">To do (new + sent)</option>
+        <option value="all">Everything</option>
+        <option value="new">Not contacted</option>
+        <option value="sent">Sent</option>
+        <option value="viewing">Viewing booked</option>
+        <option value="rejected">Rejected</option>
+      </select>
+    </label>
+    <input type="search" id="q" placeholder="Filter by street, area, text…">
+    <div class="counts" id="counts"></div>
+  </div>
+
+  <div id="list">
+  {%- for l in listings %}
+    <article class="card" data-status="new" data-id="{{ l.id }}"
+             data-value="{{ l.kr_per_sqm if l.kr_per_sqm is not none else 999999 }}"
+             data-cost="{{ l.cost }}" data-km="{{ l.km }}"
+             data-sqm="{{ l.sqm or 0 }}" data-pub="{{ l.published_at }}">
+      <div class="chead">
+        <span class="rank">{{ loop.index }}</span>
+        <span class="addr">{{ l.street or "Address not shown" }}
+          <span>· {{ l.locality or "" }}{% if l.landlord_name %} · {{ l.landlord_name }}{% endif %}</span></span>
+        {%- if l.kr_per_sqm %}
+        <span class="value">{{ l.kr_per_sqm }} kr/m²</span>
+        {%- endif %}
+        <span class="price"><b>{{ l.cost | kr }}</b>
+          <i>asking {{ l.rent | kr }} · {{ l.published_at | ago }}</i></span>
+      </div>
+      <div class="cbody">
+        <div class="left">
+          <div class="facts">
+            <div><b>Size</b><span>{{ ((l.sqm | num) ~ " m²") if l.sqm else "—" }}</span></div>
+            <div><b>Rooms</b><span>{{ (l.rooms | num) if l.rooms is not none else "—" }}</span></div>
+            <div><b>To centre</b><span>{{ l.km }} km</span></div>
+            <div><b>Term</b><span>{{ l | term }}</span></div>
+            <div><b>From</b><span>{{ l.start_date or "—" }}</span></div>
+          </div>
+          <div class="chips">
+            {%- if l.furnished is true %}<span class="chip">furnished</span>
+            {%- elif l.furnished is false %}<span class="chip">unfurnished</span>{% endif %}
+            {%- if l.first_hand %}<span class="chip">first-hand</span>{% endif %}
+            {%- if l.platform %}<span class="chip">{{ l.platform }}</span>{% endif %}
+            {%- for r in l.requirements %}<span class="chip req">{{ r.label }}</span>{% endfor %}
+          </div>
+          {%- if l.landlord_demands %}
+          <div class="quote">
+            {%- for d in l.landlord_demands %}<p>“{{ d }}”</p>{% endfor %}
+          </div>
+          {%- endif %}
+          {%- if l.description %}
+          <details><summary>Full ad text</summary><pre>{{ l.description }}</pre></details>
+          {%- endif %}
+        </div>
+        <div class="right">
+          {%- if l.hook %}
+          <p class="hook"><b>Angle:</b> {{ l.hook }}</p>
+          {%- elif not l.message %}
+          <p class="nomsg">No message composed for this listing.</p>
+          {%- endif %}
+          <textarea class="msg" data-act="msg" data-id="{{ l.id }}"
+            spellcheck="false">{{ l.message or "" }}</textarea>
+          <div class="actions">
+            <button class="copy" data-act="copy" data-id="{{ l.id }}">Copy message</button>
+            <a class="open" href="{{ l.url }}" target="_blank" rel="noopener">Open on Qasa ↗</a>
+            <span class="grow"></span>
+            <span class="status">
+              {%- for value, label in [("new","New"), ("sent","Sent"), ("viewing","Viewing"), ("rejected","No")] %}
+              <button data-act="status" data-id="{{ l.id }}" data-v="{{ value }}"
+                aria-pressed="{{ "true" if value == "new" else "false" }}">{{ label }}</button>
+              {%- endfor %}
+            </span>
+          </div>
+          <textarea class="notes" data-act="notes" data-id="{{ l.id }}"
+            placeholder="Follow-up notes — replies, viewing time, contact…"></textarea>
+        </div>
+      </div>
+    </article>
+  {%- else %}
+    <div class="empty">No listings matched the search.</div>
+  {%- endfor %}
+  </div>
+
+  <footer>Status and edits are stored in this browser only.
+    Re-run <code>/qasa-hunt</code> for a fresh search.</footer>
+</div>
+
+<script>
+// Cards are already in the DOM; this only reorders, hides and remembers.
+const KEY = "qasa-hunt:{{ generated_at }}";
+const list = document.getElementById("list");
+const cards = Array.from(document.querySelectorAll(".card"));
+
+let state = {};
+try { state = JSON.parse(localStorage.getItem(KEY) || "{}"); } catch {}
+const save = () => { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch {} };
+const entry = id => (state[id] ||= { status: "new", notes: "" });
+
+// Restore whatever this browser remembers about the run.
+for (const card of cards) {
+  const s = state[card.dataset.id];
+  if (!s) continue;
+  card.dataset.status = s.status || "new";
+  card.querySelectorAll('[data-act="status"]').forEach(b =>
+    b.setAttribute("aria-pressed", String(b.dataset.v === card.dataset.status)));
+  if (s.notes) card.querySelector('[data-act="notes"]').value = s.notes;
+  if (s.message) card.querySelector('[data-act="msg"]').value = s.message;
+}
+
+const num = (card, key) => parseFloat(card.dataset[key]);
+const SORTS = {
+  value: (a, b) => num(a, "value") - num(b, "value"),
+  cost:  (a, b) => num(a, "cost") - num(b, "cost"),
+  km:    (a, b) => num(a, "km") - num(b, "km"),
+  sqm:   (a, b) => num(b, "sqm") - num(a, "sqm"),
+  pub:   (a, b) => Date.parse(b.dataset.pub) - Date.parse(a.dataset.pub),
+};
+
+function apply() {
+  const sort = document.getElementById("sort").value;
+  const filter = document.getElementById("filter").value;
+  const q = document.getElementById("q").value.trim().toLowerCase();
+
+  cards.slice().sort(SORTS[sort]).forEach(c => list.appendChild(c));
+
+  let shown = 0;
+  for (const card of cards) {
+    const status = card.dataset.status;
+    let ok = filter === "all" ? true
+           : filter === "open" ? status !== "rejected"
+           : status === filter;
+    if (ok && q) ok = card.textContent.toLowerCase().includes(q);
+    card.hidden = !ok;
+    if (ok) shown++;
+  }
+
+  const tally = { new: 0, sent: 0, viewing: 0, rejected: 0 };
+  cards.forEach(c => tally[c.dataset.status]++);
+  document.getElementById("counts").innerHTML =
+    `<span class="pill"><b>${shown}</b> shown</span>` +
+    Object.entries(tally).filter(([, n]) => n)
+      .map(([k, n]) => `<span class="pill"><b>${n}</b> ${k}</span>`).join("");
+}
+
+document.addEventListener("click", e => {
+  const el = e.target.closest("[data-act]");
+  if (!el) return;
+  const card = el.closest(".card");
+  if (el.dataset.act === "status") {
+    entry(el.dataset.id).status = el.dataset.v;
+    card.dataset.status = el.dataset.v;
+    card.querySelectorAll('[data-act="status"]').forEach(b =>
+      b.setAttribute("aria-pressed", String(b === el)));
+    save(); apply();
+  }
+  if (el.dataset.act === "copy") {
+    const ta = card.querySelector("textarea.msg");
+    navigator.clipboard.writeText(ta.value).then(() => {
+      const was = el.textContent;
+      el.textContent = "Copied ✓";
+      setTimeout(() => (el.textContent = was), 1200);
+    });
+  }
+});
+
+// Edits stay in this browser; results.json is never rewritten.
+document.addEventListener("input", e => {
+  const el = e.target.closest("[data-act]");
+  if (!el) return;
+  if (el.dataset.act === "notes") { entry(el.dataset.id).notes = el.value; save(); }
+  if (el.dataset.act === "msg")   { entry(el.dataset.id).message = el.value; save(); }
+});
+
+["sort", "filter", "q"].forEach(id =>
+  document.getElementById(id).addEventListener("input", apply));
+apply();
+</script>
+</body>
+</html>
