@@ -19,7 +19,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
 
-      - uses: DeterminateSystems/nix-installer-action@v22
+      - uses: DeterminateSystems/nix-installer-action@v23
 
       # The image's nix store hash is content-addressed and (via the filtered
       # `src` in flake.nix) unaffected by doc/CI/config edits. Use it as the
@@ -29,9 +29,9 @@ jobs:
         id: img
         run: echo "tag=$(nix eval --raw .#docker.outPath | xargs basename | cut -d- -f1)" >> "$GITHUB_OUTPUT"
 
-      - uses: superfly/flyctl-actions/setup-flyctl@1.5
+      - uses: superfly/flyctl-actions/setup-flyctl@1.6
         with:
-          version: 0.4.80
+          version: 0.4.111
 
       # Skip the whole build/push/deploy if Fly already runs this exact image.
       # jq falls back to empty on any shape mismatch, so we fail open (deploy).

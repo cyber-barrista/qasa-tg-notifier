@@ -16,6 +16,7 @@ primary_region = "arn"
   POLL_INTERVAL_HOURS = "3"
   MAX_NOTIFY_PER_CYCLE = "40"
   BOSTAD_POLL_INTERVAL_MINS = "10"
+  NHATOT_POLL_INTERVAL_MINS = "30"
 
 [[vm]]
   size = "shared-cpu-1x"

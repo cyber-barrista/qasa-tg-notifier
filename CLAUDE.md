@@ -45,9 +45,18 @@ listings and pushes each new one to a Telegram chat. The query sets
   queue and always pass it. The whole feed is one JSON array, so all filters
   are client-side. Sessions for
   both UIs share one map via the `Session` enum in `main.rs`.
+- **`/nhatrang`** (alias `/nhatot`) — same filter-UI pattern
+  (`nhatot_search::{Screen, render, apply, passes}`) over **Chợ Tốt** (the
+  JSON backend of nhatot.com) for Nha Trang, Vietnam: age (default 7 days,
+  measured from `list_time`, which a bump rewrites — so "listed or bumped
+  within"), property type (apartment / house / both — drives the API's `cg`
+  code), ward multi-select (11 wards, labels matched verbatim against
+  `ward_name`), min rooms, min/max rent in VND, min size m². Everything but
+  the type is client-side over the newest `NHATOT_PAGES` × 50 ads. Sessions for all three UIs share one map via the
+  `Session` enum in `main.rs`.
 - **`/start` / `/help`** — usage. Commands are honored from the configured
-  `CHAT_ID`, from `BOSTAD_CHAT_ID`, and from any private (direct-message) chat;
-  other group chats are ignored. Scheduled notifications still go only to their
+  `CHAT_ID`, from `BOSTAD_CHAT_ID`, from `NHATOT_CHAT_ID`, and from any private
+  (direct-message) chat; other group chats are ignored. Scheduled notifications still go only to their
   configured chat.
 
 ## Bostad snabbt notifier (second notifier, same binary)
@@ -69,13 +78,77 @@ the `/bostad` command works regardless).
   silently miss ads. The set is persisted in the bostad chat's pinned message
   (`seen=<comma-separated ids>`), pruned each cycle to ads still live (a
   handful), plus what was just sent. Don't "simplify" it back to a watermark.
-- `BOSTAD_CHAT_ID` must differ from `CHAT_ID` (enforced at startup): each
-  notifier stores state in *the* pinned message of its chat, and `getChat`
-  exposes only the most recently pinned one.
+- `BOSTAD_CHAT_ID` must differ from `CHAT_ID` and `NHATOT_CHAT_ID` (enforced
+  at startup): each notifier stores state in *the* pinned message of its
+  chat, and `getChat` exposes only the most recently pinned one.
 
-Three concurrent loops run (`tokio::spawn` + `select!`): the periodic Qasa
-notifier, the (optional) bostad notifier, and the command listener (handles
-both messages and `CallbackQuery` button presses).
+## Nha Trang rentals notifier (third notifier, same binary)
+
+`nhatot.rs` polls **Chợ Tốt's** public ad-listing API — the JSON backend of
+nhatot.com (the property section of Chợ Tốt, Vietnam's Blocket) — for new
+rentals in Nha Trang and posts them to `NHATOT_CHAT_ID` (unset ⇒ notifier
+disabled; `/nhatrang` works regardless). Default poll every 30 min: not
+first-come-first-served like Bostad snabbt, but faster than Qasa's 3 h.
+Everything below was verified live on 2026-10-04 — don't re-probe, extend.
+
+- `GET https://gateway.chotot.com/v1/public/ad-listing?region_v2=7044&area_v2=704401&cg=<cat>&st=u&limit=50&o=<offset>`.
+  Unauthenticated, no Cloudflare challenge (the nhatot.com HTML *is*
+  challenged; irrelevant, the gateway is the data). `region_v2=7044` Khánh
+  Hòa, `area_v2=704401` Thành phố Nha Trang (codes from
+  `GET https://gateway.chotot.com/v2/public/chapy-pro/regions`). `cg`: `1010`
+  Căn hộ/Chung cư (apartments, 61 live), `1020` Nhà ở (houses, 122), `1050`
+  Phòng trọ (rooms, 1), `1000` all real estate (211, also offices/land — the
+  cycle keeps 1010/1020 via `Ad::is_home`). `st=u` rent / `s` sale. `limit`
+  is **capped at 50** server-side; `o` is the offset; response
+  `{"ads":[…],"total":N}` ordered by `list_time` desc. Server-side
+  `price=a-b` and `rooms=n` exist but we filter client-side like bostad.
+  reqwest is built without its `query` feature, so the URL is hand-built.
+- Volume: ~3–5 new Nha Trang apartment ads/day; the 50 newest span ~2 weeks.
+- **Dedup is a seen-id set pruned to the scanned window** (`NHATOT_PAGES`=2 ⇒
+  100 newest), via the shared `telegram::{read,write}_seen_state`. Ads get
+  *bumped*: `list_time` is rewritten and `orig_list_time` keeps the original
+  (16/50 ads), and neither `ad_id` nor `list_id` is monotonic with
+  `list_time`, so a watermark would miss ads. An ad bumped back after
+  dropping out of the window re-notifies, tagged `↻ bumped`. An empty fetch
+  leaves state untouched (would otherwise prune everything and re-flood).
+- Public URL: `https://www.nhatot.com/{list_id}.htm` (redirects to the slug
+  URL; verified in a browser). Message shows the title, price as `14M ₫/month`
+  (from the numeric field; the Vietnamese `price_string` is the fallback),
+  size · bedrooms, street/ward · project, category in English, bump tag, and a
+  200-char body preview. `telegram::nhatot_location` dedups addresses —
+  sellers paste "Đường X, Phường Y, Thành phố Nha Trang, Khánh Hòa" into
+  `street_name` — and strips the Đường/Phường/Xã prefixes.
+- **Translation (`deepl.rs`):** with `DEEPL_API_KEY` set, `main::translate_ad`
+  sends each ad's title and the first 500 chars of its body to DeepL
+  (`VI` → `EN-US`, one request per ad, right before sending) and tags the
+  message `🌐 translated`; a DeepL failure logs and posts the original. Keys
+  ending in `:fx` are free-plan keys and go to `api-free.deepl.com` (the Pro
+  host rejects them). Hand-rolled on the shared reqwest client; the `deepl`
+  crate (0.8, reqwest 0.13) was considered and skipped as six crates for one
+  POST. The free plan's 500k chars/month is ample: ~5 ads/day × ≤600 chars.
+- Wards in `nhatot_search.rs` are the 11 `ward_name` values present in the
+  live feed (Phước Hải, Lộc Thọ, Vĩnh Phước, Vĩnh Hòa, Phước Long, Xương
+  Huân, Vĩnh Trường, Ngọc Hiệp, Xã Vĩnh Thái, Tân Lập, Vĩnh Hải).
+- **Other Vietnamese sources, researched and rejected (2026-10-04):**
+  - *Batdongsan.com.vn*: Cloudflare managed challenge on every path (even
+    `robots.txt`), and any query string (`?sortValue=1`) hits a WAF block
+    even in a real browser; path filters (`/p2`, `/gia-tu-5-trieu-den-10-trieu`)
+    work. A real browser passes the challenge; its `cf_clearance` cookie then
+    works for plain HTTP from the **same IP with the same User-Agent** (not
+    TLS-bound; ~1 year expiry). Not implemented: the cookie would have to be
+    minted from the Fly machine's egress IP, and container/headless Chrome is
+    reported blocked. Cards (`div.js__card[prid]`, `.re__card-config-price`,
+    `.re__card-published-info-published-at[aria-label=dd/mm/yyyy]`) are
+    server-rendered if that is ever revisited.
+  - *Mogi.vn*: plain HTML (15 cards/page), but only 58 Khánh Hòa listings,
+    ~5 new in 4 months, no city-level URL (`/tp-nha-trang/...` redirects to
+    the national list), no newest-first sort. Not worth a parser.
+  - *Facebook groups*: no readable API (Groups API removed 2024).
+
+Four concurrent loops run (`tokio::spawn` + `select!`): the periodic Qasa
+notifier, the (optional) bostad notifier, the (optional) nhatot notifier, and
+the command listener (handles both messages and `CallbackQuery` button
+presses).
 **Only one instance may run per bot token** — Telegram returns 409 if two poll
 `getUpdates` at once, so don't run `make debug` while the container/Fly app is
 live. The neighborhood slug list in `search.rs` is curated — invalid Qasa area
@@ -85,8 +158,10 @@ slugs silently return a country-wide result, so only verified ones are included.
   hand-written query `const` + drift-tolerant `Option`/`#[serde(default)]`
   structs; `fetch_new` pages by offset/limit), `bostad.rs` (Bostadsförmedlingen
   feed client, same drift-tolerant style), `bostad_search.rs` (`/bostad` UI),
-  `telegram.rs` (frankenstein wrapper), `main.rs` (interval loops →
-  `run_cycle` / `run_bostad_cycle`).
+  `nhatot.rs` (Chợ Tốt client, offset-paged), `nhatot_search.rs` (`/nhatrang`
+  UI), `deepl.rs` (translate-only DeepL client), `telegram.rs` (frankenstein wrapper; the Qasa watermark and the
+  bostad/nhatot seen-sets share `pinned_text`/`upsert_pinned`), `main.rs`
+  (interval loops → `run_cycle` / `run_bostad_cycle` / `run_nhatot_cycle`).
 - **"Genuinely new" without a database:** Qasa home ids are monotonic integers,
   so the newest id seen is the watermark. It's persisted **in Telegram itself**:
   a single pinned "state" message in the chat holds `watermark=<id>`. On boot the
@@ -97,20 +172,30 @@ slugs silently return a country-wide result, so only verified ones are included.
   subsequent cycles rather than dropped.
 - **Libraries:** `frankenstein` (Telegram, rustls), `reqwest` + `serde`
   (GraphQL, plain client — no codegen, robust to schema drift),
-  `tokio::time::interval` (scheduling). Pinned to `frankenstein 0.50` because
-  0.51 is tagged on GitHub but not yet on crates.io.
+  `tokio::time::interval` (scheduling). Dependency bumps arrive as Renovate
+  PRs (`renovate.json`): Cargo, the flake inputs, and the pinned GitHub
+  Actions / flyctl version in `fly.yml`.
 
 ## Configuration (env vars)
 
 - `BOT_TOKEN` (**secret**, required) — from @BotFather.
 - `CHAT_ID` (**secret**, required) — target chat id (i64).
 - `BOSTAD_CHAT_ID` (**secret**, optional) — chat for Bostad snabbt
-  notifications; unset disables that notifier. Must differ from `CHAT_ID`.
+  notifications; unset disables that notifier.
+- `NHATOT_CHAT_ID` (**secret**, optional) — chat for Nha Trang (Chợ Tốt)
+  notifications; unset disables that notifier.
+- `DEEPL_API_KEY` (**secret**, optional) — translate Chợ Tốt ads to English;
+  unset posts them in Vietnamese. `DEEPL_ENDPOINT` overrides the host.
+- All configured chat ids must be pairwise distinct (enforced at startup):
+  each notifier stores its state in *the* pinned message of its chat, and
+  bostad/nhatot even share the `seen=` marker.
 - `QASA_AREA` (default `se/stockholm`), `HOME_TYPES` (default `apartment`,
   comma-separated), `POLL_INTERVAL_HOURS` (default `3`),
   `MAX_NOTIFY_PER_CYCLE` (default `40`, shared by both notifiers),
   `QASA_ENDPOINT`, `BOSTAD_POLL_INTERVAL_MINS` (default `10`),
-  `BOSTAD_ENDPOINT`, `RUST_LOG`.
+  `BOSTAD_ENDPOINT`, `NHATOT_POLL_INTERVAL_MINS` (default `30`),
+  `NHATOT_ENDPOINT`, `NHATOT_REGION` (default `7044`), `NHATOT_AREA` (default
+  `704401`), `NHATOT_CATEGORY` (default `1000`), `RUST_LOG`.
 
 Non-secret defaults live in `.github/fly.toml [env]` and the image `config.Env`;
 secrets come from `fly secrets set`. Locally, `make run` reads `BOT_TOKEN`/
@@ -221,6 +306,9 @@ listing → a local results page served over http.
 - `flake.lock` pins everything; `Cargo.lock` must be committed (the nix build
   vendors deps from it). After changing `Cargo.toml`, build once inside the
   dev shell and commit the updated lock.
+- Flakes only see **git-tracked** files: a brand-new `src/*.rs` must be
+  `git add`ed before `nix build` / `make image`, or the build fails with
+  "file not found for module" even though `cargo test` passes.
 - Git identity in this repo is overridden to a personal address
   (cyber.barrista@gmail.com) in `.git/config`; the global config uses the
   work email.

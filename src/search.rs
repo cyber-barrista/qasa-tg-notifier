@@ -373,7 +373,9 @@ pub(crate) fn menu(buttons: Vec<InlineKeyboardButton>, per_row: usize) -> Inline
         .map(<[InlineKeyboardButton]>::to_vec)
         .collect();
     inline_keyboard.push(vec![button("⬅ Back".to_string(), "back")]);
-    InlineKeyboardMarkup { inline_keyboard }
+    InlineKeyboardMarkup::builder()
+        .inline_keyboard(inline_keyboard)
+        .build()
 }
 
 /// The main screen: one button per filter, then Search.
@@ -398,7 +400,9 @@ fn main_keyboard(f: &Filters) -> InlineKeyboardMarkup {
         )],
         vec![button("🔎 Search".to_string(), "go")],
     ];
-    InlineKeyboardMarkup { inline_keyboard }
+    InlineKeyboardMarkup::builder()
+        .inline_keyboard(inline_keyboard)
+        .build()
 }
 
 fn age_keyboard(f: &Filters) -> InlineKeyboardMarkup {
@@ -467,7 +471,9 @@ fn area_keyboard(f: &Filters) -> InlineKeyboardMarkup {
         button("🧹 Clear".to_string(), "areaclear"),
         button("✅ Done".to_string(), "back"),
     ]);
-    InlineKeyboardMarkup { inline_keyboard }
+    InlineKeyboardMarkup::builder()
+        .inline_keyboard(inline_keyboard)
+        .build()
 }
 
 #[cfg(test)]

@@ -1,12 +1,16 @@
 //! qasa-tg-notifier: every few hours, poll Qasa's public GraphQL API for
 //! genuinely new Stockholm apartment listings and push them to a Telegram
 //! chat. Optionally also polls Bostadsförmedlingen's feed every few minutes
-//! for new first-come-first-served "Bostad snabbt" ads (a separate chat).
-//! Serves interactive `/search` and `/bostad` filter UIs.
+//! for new first-come-first-served "Bostad snabbt" ads (a separate chat), and
+//! Chợ Tốt's listings for new Nha Trang rentals (another separate chat).
+//! Serves interactive `/search`, `/bostad` and `/nhatrang` filter UIs.
 
 mod bostad;
 mod bostad_search;
 mod config;
+mod deepl;
+mod nhatot;
+mod nhatot_search;
 mod qasa;
 mod search;
 mod telegram;
@@ -33,18 +37,29 @@ const SEARCH_SCAN_MAX: usize = 200;
 /// Pause between messages. Telegram caps sends to a single group at ~20/min,
 /// so ~3s spacing keeps us under it; the 429-retry in `telegram` is the backstop.
 const SEND_GAP: Duration = Duration::from_secs(3);
+/// How many 50-ad pages of the Chợ Tốt listing to scan per cycle/search. At
+/// ~3–5 new Nha Trang ads a day the 100 newest span a few weeks, and the
+/// seen-set is pruned to this window, so it stays ≤ 100 ids.
+const NHATOT_PAGES: usize = 2;
+/// How much of a Chợ Tốt description to send to DeepL. Longer than the
+/// posted preview so the cut falls after translation, short enough to keep
+/// the free plan's 500k chars/month comfortable.
+const TRANSLATE_BODY_CHARS: usize = 500;
 
 const HELP: &str = "QASA notifier.\n\
      • /search — open the Qasa filter UI (neighborhood, age, rooms, max rent).\n\
      • /bostad — open the Bostadsförmedlingen filter UI (category, kommun, rooms, rent, queue years).\n\
+     • /nhatrang — open the Nha Trang (Chợ Tốt) filter UI (type, ward, rooms, rent, size).\n\
      • I also post new Stockholm apartments automatically every few hours,\n\
-       and new first-come-first-served Bostad snabbt ads every few minutes.";
+       new first-come-first-served Bostad snabbt ads every few minutes,\n\
+       and new Nha Trang rentals every half hour.";
 
 /// An in-progress filter-UI session: which search a config message belongs to.
 #[derive(Clone)]
 enum Session {
     Qasa(search::Filters),
     Bostad(bostad_search::Filters),
+    Nhatot(nhatot_search::Filters),
 }
 
 /// In-progress search sessions, keyed by (chat_id, config-message_id).
@@ -92,6 +107,24 @@ async fn main() -> Result<()> {
         // Disabled: park a task that never resolves so the select! below is uniform.
         None => tokio::spawn(std::future::pending()),
     };
+    let nhatot_notifier = match cfg.nhatot_chat_id {
+        Some(chat_id) => {
+            info!(
+                chat_id,
+                interval_secs = cfg.nhatot_interval.as_secs(),
+                category = cfg.nhatot_category,
+                translate = cfg.deepl_api_key.is_some(),
+                "nhatot (Nha Trang) notifier enabled"
+            );
+            tokio::spawn(nhatot_notifier_loop(
+                http.clone(),
+                bot.clone(),
+                cfg.clone(),
+                chat_id,
+            ))
+        }
+        None => tokio::spawn(std::future::pending()),
+    };
     let commands = tokio::spawn(command_loop(http, bot, cfg));
 
     // No loop returns in normal operation; if one dies, exit so the
@@ -99,6 +132,7 @@ async fn main() -> Result<()> {
     tokio::select! {
         r = notifier => error!("notifier task exited: {r:?}"),
         r = bostad_notifier => error!("bostad notifier task exited: {r:?}"),
+        r = nhatot_notifier => error!("nhatot notifier task exited: {r:?}"),
         r = commands => error!("command task exited: {r:?}"),
     }
     Ok(())
@@ -212,13 +246,13 @@ async fn run_bostad_cycle(
         .collect();
     let live_ids: BTreeSet<u64> = snabbt.iter().map(|ad| ad.annons_id).collect();
 
-    let state = telegram::read_bostad_state(bot, chat_id)
+    let state = telegram::read_seen_state(bot, chat_id)
         .await
         .context("reading pinned bostad state")?;
 
     let Some(state) = state else {
         // First run: record every live ad, notify nothing.
-        telegram::write_bostad_state(bot, chat_id, None, &live_ids).await?;
+        telegram::write_seen_state(bot, chat_id, None, &telegram::BOSTAD_STATE, &live_ids).await?;
         info!(
             live = live_ids.len(),
             "seeded bostad state on first run; no notifications sent"
@@ -257,13 +291,121 @@ async fn run_bostad_cycle(
     seen.extend(new[..send_n].iter().map(|ad| ad.annons_id));
     // Skip the write when nothing changed — Telegram rejects a no-op edit.
     if seen != state.seen {
-        telegram::write_bostad_state(bot, chat_id, Some(state.message_id), &seen).await?;
+        telegram::write_seen_state(
+            bot,
+            chat_id,
+            Some(state.message_id),
+            &telegram::BOSTAD_STATE,
+            &seen,
+        )
+        .await?;
     }
 
     if total > 0 {
         info!(sent = send_n, total_new = total, "bostad cycle complete");
     } else {
         info!("no new bostad snabbt ads");
+    }
+    Ok(())
+}
+
+/// Poll Chợ Tốt every `cfg.nhatot_interval` and push new Nha Trang rentals.
+async fn nhatot_notifier_loop(http: reqwest::Client, bot: Bot, cfg: Config, chat_id: i64) {
+    let mut ticker = tokio::time::interval(cfg.nhatot_interval);
+    loop {
+        ticker.tick().await;
+        if let Err(e) = run_nhatot_cycle(&http, &bot, &cfg, chat_id).await {
+            error!("nhatot cycle failed: {e:#}");
+        }
+    }
+}
+
+/// One Nha Trang cycle. Same seen-set scheme as bostad: Chợ Tốt ids are not
+/// monotonic with listing time and `list_time` is rewritten on bump, so a
+/// watermark would miss ads. The set is pruned to the ids in the scanned
+/// window; an ad bumped back after dropping out of it re-notifies, tagged.
+async fn run_nhatot_cycle(
+    http: &reqwest::Client,
+    bot: &Bot,
+    cfg: &Config,
+    chat_id: i64,
+) -> Result<()> {
+    let ads: Vec<nhatot::Ad> = nhatot::fetch_rent(http, cfg, cfg.nhatot_category, NHATOT_PAGES)
+        .await
+        .context("fetching Chợ Tốt listings")?
+        .into_iter()
+        .filter(nhatot::Ad::is_home)
+        .collect();
+    if ads.is_empty() {
+        // An empty window would prune the whole seen-set and re-notify
+        // everything next cycle; treat it as a feed hiccup instead.
+        warn!("nhatot feed returned no ads; leaving state untouched");
+        return Ok(());
+    }
+    let window: BTreeSet<u64> = ads.iter().map(|ad| ad.ad_id).collect();
+
+    let state = telegram::read_seen_state(bot, chat_id)
+        .await
+        .context("reading pinned nhatot state")?;
+
+    let Some(state) = state else {
+        // First run: record the whole window, notify nothing.
+        telegram::write_seen_state(bot, chat_id, None, &telegram::NHATOT_STATE, &window).await?;
+        info!(
+            window = window.len(),
+            "seeded nhatot state on first run; no notifications sent"
+        );
+        return Ok(());
+    };
+
+    let mut new: Vec<&nhatot::Ad> = ads
+        .iter()
+        .filter(|ad| !state.seen.contains(&ad.ad_id))
+        .collect();
+    // Oldest-new first, so the chat reads chronologically (by listing time,
+    // since ids don't order by time here).
+    new.sort_by_key(|ad| ad.list_time);
+    let total = new.len();
+    let send_n = total.min(cfg.max_notify);
+
+    let translator = deepl::Translator::from_config(http, cfg);
+    for ad in &new[..send_n] {
+        let ad = translate_ad(ad, translator.as_ref()).await;
+        if let Err(e) = telegram::send_nhatot_listing(bot, chat_id, &ad).await {
+            warn!(id = ad.ad_id, "failed to send nhatot listing: {e:#}");
+        }
+        tokio::time::sleep(SEND_GAP).await;
+    }
+    if total > send_n {
+        let more = total - send_n;
+        let _ = telegram::send_note(
+            bot,
+            chat_id,
+            &format!("…and {more} more new ad(s) — sending next cycle."),
+        )
+        .await;
+    }
+
+    // Seen = ads still in the window we'd already seen, plus what we just
+    // sent. Ads capped out of this cycle stay unseen and go out next cycle.
+    let mut seen: BTreeSet<u64> = state.seen.intersection(&window).copied().collect();
+    seen.extend(new[..send_n].iter().map(|ad| ad.ad_id));
+    // Skip the write when nothing changed — Telegram rejects a no-op edit.
+    if seen != state.seen {
+        telegram::write_seen_state(
+            bot,
+            chat_id,
+            Some(state.message_id),
+            &telegram::NHATOT_STATE,
+            &seen,
+        )
+        .await?;
+    }
+
+    if total > 0 {
+        info!(sent = send_n, total_new = total, "nhatot cycle complete");
+    } else {
+        info!("no new nhatot ads");
     }
     Ok(())
 }
@@ -314,6 +456,7 @@ async fn command_loop(http: reqwest::Client, bot: Bot, cfg: Config) {
 fn chat_allowed(cfg: &Config, chat: &Chat) -> bool {
     chat.id == cfg.chat_id
         || Some(chat.id) == cfg.bostad_chat_id
+        || Some(chat.id) == cfg.nhatot_chat_id
         || chat.type_field == ChatType::Private
 }
 
@@ -375,6 +518,17 @@ async fn handle_message(
                 Err(e) => error!(user = %who, "failed to open bostad search: {e:#}"),
             }
         }
+        "/nhatrang" | "/nhatot" => {
+            info!(user = %who, command = cmd, "opening nhatot search UI");
+            let filters = nhatot_search::Filters::default();
+            let (text, keyboard) = nhatot_search::render(nhatot_search::Screen::Main, &filters);
+            match telegram::send_keyboard(bot, chat_id, &text, keyboard).await {
+                Ok(message) => {
+                    sessions.insert((chat_id, message.message_id), Session::Nhatot(filters));
+                }
+                Err(e) => error!(user = %who, "failed to open nhatot search: {e:#}"),
+            }
+        }
         "/start" | "/help" => {
             info!(user = %who, command = cmd, "help requested");
             let _ = telegram::send_note(bot, chat_id, HELP).await;
@@ -421,7 +575,7 @@ async fn handle_callback(
             bot,
             chat_id,
             message_id,
-            "This search expired — send /search or /bostad to start a new one.",
+            "This search expired — send /search, /bostad or /nhatrang to start a new one.",
         )
         .await;
         return;
@@ -496,6 +650,42 @@ async fn handle_callback(
                 ));
             }
             bostad_search::Action::Ignore => {}
+        },
+        Session::Nhatot(mut filters) => match nhatot_search::apply(&mut filters, data) {
+            nhatot_search::Action::Show(screen) => {
+                let (text, keyboard) = nhatot_search::render(screen, &filters);
+                let _ = telegram::edit_keyboard(bot, chat_id, message_id, &text, keyboard).await;
+                sessions.insert(key, Session::Nhatot(filters));
+            }
+            nhatot_search::Action::Search => {
+                info!(
+                    user = %who,
+                    max_age_hours = ?filters.max_age_hours,
+                    category = ?filters.category,
+                    min_rooms = filters.min_rooms,
+                    min_rent = ?filters.min_rent,
+                    max_rent = ?filters.max_rent,
+                    min_size = ?filters.min_size,
+                    wards = %filters.ward_summary(),
+                    "nhatot search triggered"
+                );
+                sessions.remove(&key);
+                let _ = telegram::edit_plain(
+                    bot,
+                    chat_id,
+                    message_id,
+                    &format!("🔎 Searching…\n\n{}", nhatot_search::describe(&filters)),
+                )
+                .await;
+                tokio::spawn(run_nhatot_search(
+                    http.clone(),
+                    bot.clone(),
+                    cfg.clone(),
+                    chat_id,
+                    filters,
+                ));
+            }
+            nhatot_search::Action::Ignore => {}
         },
     }
 }
@@ -622,4 +812,110 @@ async fn run_bostad_search(
         format!("✅ {total} match(es).")
     };
     let _ = telegram::send_note(&bot, chat_id, &note).await;
+}
+
+/// Fetch, filter, and post the results of a completed /nhatrang search.
+async fn run_nhatot_search(
+    http: reqwest::Client,
+    bot: Bot,
+    cfg: Config,
+    chat_id: i64,
+    filters: nhatot_search::Filters,
+) {
+    let ads = match nhatot::fetch_rent(&http, &cfg, filters.category.cg(), NHATOT_PAGES).await {
+        Ok(v) => v,
+        Err(e) => {
+            error!("nhatot search fetch failed: {e:#}");
+            let _ = telegram::send_note(&bot, chat_id, "⚠️ Search failed, please try again.").await;
+            return;
+        }
+    };
+
+    let now_ms = OffsetDateTime::now_utc().unix_timestamp() * 1000;
+    let mut matches: Vec<nhatot::Ad> = ads
+        .into_iter()
+        .filter(|ad| nhatot_search::passes(&filters, ad, now_ms))
+        .collect();
+    let total = matches.len();
+
+    if total == 0 {
+        info!(wards = %filters.ward_summary(), "nhatot search returned no matches");
+        let _ = telegram::send_note(&bot, chat_id, "No matches for those filters.").await;
+        return;
+    }
+
+    // Keep the newest by listing time, post oldest-first.
+    matches.sort_by_key(|ad| ad.list_time);
+    if matches.len() > RECENT_MAX_LISTINGS {
+        matches = matches.split_off(matches.len() - RECENT_MAX_LISTINGS);
+    }
+
+    info!(
+        wards = %filters.ward_summary(),
+        total_matches = total,
+        posting = matches.len(),
+        "nhatot search complete"
+    );
+
+    let translator = deepl::Translator::from_config(&http, &cfg);
+    for ad in &matches {
+        let ad = translate_ad(ad, translator.as_ref()).await;
+        if let Err(e) = telegram::send_nhatot_listing(&bot, chat_id, &ad).await {
+            warn!(id = ad.ad_id, "failed to send nhatot listing: {e:#}");
+        }
+        tokio::time::sleep(SEND_GAP).await;
+    }
+
+    let note = if total > matches.len() {
+        format!(
+            "✅ {} matches — showing the newest {}.",
+            total,
+            matches.len()
+        )
+    } else {
+        format!("✅ {total} match(es).")
+    };
+    let _ = telegram::send_note(&bot, chat_id, &note).await;
+}
+
+/// Copy of `ad` with its Vietnamese title and (pre-cut) description
+/// translated to English when DeepL is configured. Any failure logs and
+/// falls back to the original text, so a translation outage never drops an
+/// ad.
+async fn translate_ad(ad: &nhatot::Ad, translator: Option<&deepl::Translator>) -> nhatot::Ad {
+    let mut out = ad.clone();
+    let Some(translator) = translator else {
+        return out;
+    };
+    let subject = ad.subject.as_deref().map(str::trim).unwrap_or("");
+    let body = ad
+        .body
+        .as_deref()
+        .map(|b| telegram::preview(b, TRANSLATE_BODY_CHARS))
+        .unwrap_or_default();
+    // DeepL rejects empty strings, so only send what exists.
+    let mut texts: Vec<&str> = Vec::new();
+    if !subject.is_empty() {
+        texts.push(subject);
+    }
+    if !body.is_empty() {
+        texts.push(&body);
+    }
+    if texts.is_empty() {
+        return out;
+    }
+    match translator.translate(&texts).await {
+        Ok(translated) => {
+            let mut it = translated.into_iter();
+            if !subject.is_empty() {
+                out.subject = it.next();
+            }
+            if !body.is_empty() {
+                out.body = it.next();
+            }
+            out.translated = true;
+        }
+        Err(e) => warn!(id = ad.ad_id, "translation failed, posting original: {e:#}"),
+    }
+    out
 }

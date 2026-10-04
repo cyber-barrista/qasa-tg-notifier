@@ -413,7 +413,9 @@ fn main_keyboard(f: &Filters) -> InlineKeyboardMarkup {
         )],
         vec![button("🔎 Search".to_string(), "go")],
     ];
-    InlineKeyboardMarkup { inline_keyboard }
+    InlineKeyboardMarkup::builder()
+        .inline_keyboard(inline_keyboard)
+        .build()
 }
 
 fn category_keyboard(f: &Filters) -> InlineKeyboardMarkup {
@@ -496,7 +498,9 @@ fn kommun_keyboard(f: &Filters) -> InlineKeyboardMarkup {
         button("🧹 Clear".to_string(), "kommunclear"),
         button("✅ Done".to_string(), "back"),
     ]);
-    InlineKeyboardMarkup { inline_keyboard }
+    InlineKeyboardMarkup::builder()
+        .inline_keyboard(inline_keyboard)
+        .build()
 }
 
 #[cfg(test)]

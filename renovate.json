@@ -1,0 +1,38 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "rangeStrategy": "bump",
+  "commitMessagePrefix": "[Common] ",
+  "prConcurrentLimit": 3,
+  "labels": ["common"],
+  "schedule": ["on the 15th day of the month"],
+  "separateMajorMinor": false,
+  "lockFileMaintenance": {
+    "enabled": true
+  },
+  "nix": {
+    "enabled": true
+  },
+  "packageRules": [
+    {
+      "digest": {
+        "enabled": false
+      }
+    },
+    {
+      "matchUpdateTypes": ["*"],
+      "groupName": "all"
+    }
+  ],
+  "customManagers": [
+    {
+      "description": "flyctl version pinned under setup-flyctl's `with: version:` in fly.yml; not a `uses:` ref, so the github-actions manager doesn't see it",
+      "customType": "regex",
+      "managerFilePatterns": ["/^\\.github/workflows/fly\\.yml$/"],
+      "matchStrings": ["setup-flyctl@[^\\n]*\\n\\s*with:\\n\\s*version:\\s*(?<currentValue>\\d+\\.\\d+\\.\\d+)"],
+      "depNameTemplate": "superfly/flyctl",
+      "datasourceTemplate": "github-releases",
+      "extractVersionTemplate": "^v(?<version>.*)$"
+    }
+  ]
+}
