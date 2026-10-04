@@ -2,6 +2,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 
+use crate::nhatot::City;
+
 /// Runtime configuration, read entirely from environment variables.
 ///
 /// `BOT_TOKEN` and `CHAT_ID` are required (set as Fly secrets in production);
@@ -32,9 +34,9 @@ pub struct Config {
     pub nhatot_chat_id: Option<i64>,
     pub nhatot_interval: Duration,
     pub nhatot_endpoint: String,
-    /// Chợ Tốt `region_v2` / `area_v2` codes (default Khánh Hòa / Nha Trang).
-    pub nhatot_region: String,
-    pub nhatot_area: String,
+    /// Cities the notifier polls (the `/nhatrang` and `/danang` commands work
+    /// regardless). Default: both.
+    pub nhatot_cities: Vec<City>,
     /// Chợ Tốt `cg` category code the notifier polls (default: all real
     /// estate, filtered to apartments + houses client-side).
     pub nhatot_category: u32,
@@ -92,8 +94,16 @@ impl Config {
             "NHATOT_ENDPOINT",
             "https://gateway.chotot.com/v1/public/ad-listing",
         );
-        let nhatot_region = optional("NHATOT_REGION", "7044");
-        let nhatot_area = optional("NHATOT_AREA", "704401");
+        let nhatot_cities = optional("NHATOT_CITIES", "nhatrang,danang")
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|slug| {
+                City::from_slug(slug).with_context(|| {
+                    format!("NHATOT_CITIES: unknown city {slug:?} (known: nhatrang, danang)")
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
         let nhatot_category = optional("NHATOT_CATEGORY", "1000")
             .parse()
             .context("NHATOT_CATEGORY must be an integer (a Chợ Tốt cg code)")?;
@@ -118,8 +128,7 @@ impl Config {
             nhatot_chat_id,
             nhatot_interval,
             nhatot_endpoint,
-            nhatot_region,
-            nhatot_area,
+            nhatot_cities,
             nhatot_category,
             deepl_api_key,
             deepl_endpoint,

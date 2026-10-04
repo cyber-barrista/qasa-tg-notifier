@@ -37,22 +37,58 @@ const SEARCH_SCAN_MAX: usize = 200;
 /// Pause between messages. Telegram caps sends to a single group at ~20/min,
 /// so ~3s spacing keeps us under it; the 429-retry in `telegram` is the backstop.
 const SEND_GAP: Duration = Duration::from_secs(3);
-/// How many 50-ad pages of the Chợ Tốt listing to scan per cycle/search. At
-/// ~3–5 new Nha Trang ads a day the 100 newest span a few weeks, and the
-/// seen-set is pruned to this window, so it stays ≤ 100 ids.
-const NHATOT_PAGES: usize = 2;
+/// Pages (50 ads each) a `/nhatrang` or `/danang` search scans per request.
+const NHATOT_SEARCH_PAGES: usize = 4;
+/// Pages the notifier scans per city × category each cycle. One page is
+/// plenty: Đà Nẵng's 50 newest apartment ads span ~6 h against a 30-min
+/// poll, and the pinned seen-set is pruned to this window, so with two
+/// cities × two categories it stays ≤ 200 ids (Telegram caps a message at
+/// 4096 chars).
+const NHATOT_NOTIFY_PAGES: usize = 1;
+/// The notifier only posts ads *first* listed this recently. Đà Nẵng sellers
+/// bump constantly; without this, every old ad bumped back into the window
+/// after dropping out of it would be re-posted as new.
+const NHATOT_NOTIFY_MAX_FIRST_LISTED_HOURS: i64 = 48;
 /// How much of a Chợ Tốt description to send to DeepL. Longer than the
 /// posted preview so the cut falls after translation, short enough to keep
 /// the free plan's 500k chars/month comfortable.
 const TRANSLATE_BODY_CHARS: usize = 500;
 
-const HELP: &str = "QASA notifier.\n\
+const HELP_COMMANDS: &str = "QASA notifier.\n\
      • /search — open the Qasa filter UI (neighborhood, age, rooms, max rent).\n\
      • /bostad — open the Bostadsförmedlingen filter UI (category, kommun, rooms, rent, queue years).\n\
-     • /nhatrang — open the Nha Trang (Chợ Tốt) filter UI (type, ward, rooms, rent, size).\n\
-     • I also post new Stockholm apartments automatically every few hours,\n\
-       new first-come-first-served Bostad snabbt ads every few minutes,\n\
-       and new Nha Trang rentals every half hour.";
+     • /nhatrang — open the Nha Trang (Chợ Tốt) filter UI (age, type, ward, rooms, rent, size).\n\
+     • /danang — the same for Da Nang (districts instead of wards).";
+
+/// `/help` text for a given chat: the command list, plus a line about the
+/// scheduled posts *this* chat receives. Chats without a notifier (DMs,
+/// other groups) get the commands only.
+fn help_text(cfg: &Config, chat_id: i64) -> String {
+    let scheduled = if chat_id == cfg.chat_id {
+        Some(format!(
+            "I also post new Stockholm apartments from Qasa here every {} hours.",
+            cfg.interval.as_secs() / 3600
+        ))
+    } else if Some(chat_id) == cfg.bostad_chat_id {
+        Some(format!(
+            "I also post new first-come-first-served Bostad snabbt ads here every {} minutes.",
+            cfg.bostad_interval.as_secs() / 60
+        ))
+    } else if Some(chat_id) == cfg.nhatot_chat_id {
+        let cities: Vec<&str> = cfg.nhatot_cities.iter().map(|c| c.label()).collect();
+        Some(format!(
+            "I also post new {} rentals from Chợ Tốt here every {} minutes.",
+            cities.join(" and "),
+            cfg.nhatot_interval.as_secs() / 60
+        ))
+    } else {
+        None
+    };
+    match scheduled {
+        Some(line) => format!("{HELP_COMMANDS}\n• {line}"),
+        None => HELP_COMMANDS.to_string(),
+    }
+}
 
 /// An in-progress filter-UI session: which search a config message belongs to.
 #[derive(Clone)]
@@ -112,9 +148,10 @@ async fn main() -> Result<()> {
             info!(
                 chat_id,
                 interval_secs = cfg.nhatot_interval.as_secs(),
+                cities = ?cfg.nhatot_cities,
                 category = cfg.nhatot_category,
                 translate = cfg.deepl_api_key.is_some(),
-                "nhatot (Nha Trang) notifier enabled"
+                "nhatot (Vietnam) notifier enabled"
             );
             tokio::spawn(nhatot_notifier_loop(
                 http.clone(),
@@ -330,12 +367,26 @@ async fn run_nhatot_cycle(
     cfg: &Config,
     chat_id: i64,
 ) -> Result<()> {
-    let ads: Vec<nhatot::Ad> = nhatot::fetch_rent(http, cfg, cfg.nhatot_category, NHATOT_PAGES)
-        .await
-        .context("fetching Chợ Tốt listings")?
-        .into_iter()
-        .filter(nhatot::Ad::is_home)
-        .collect();
+    // One request per city × category: `cg=1000` would share one page
+    // between apartments, houses, offices and land, so split it.
+    let categories: Vec<u32> = if cfg.nhatot_category == nhatot::CATEGORY_ALL {
+        vec![nhatot::CATEGORY_APARTMENT, nhatot::CATEGORY_HOUSE]
+    } else {
+        vec![cfg.nhatot_category]
+    };
+    let now_ms = OffsetDateTime::now_utc().unix_timestamp() * 1000;
+    let first_listed_floor = now_ms - NHATOT_NOTIFY_MAX_FIRST_LISTED_HOURS * 3_600_000;
+    let mut ads: Vec<nhatot::Ad> = Vec::new();
+    for city in &cfg.nhatot_cities {
+        for &category in &categories {
+            let page = nhatot::fetch_rent(http, cfg, *city, &[], category, NHATOT_NOTIFY_PAGES)
+                .await
+                .with_context(|| format!("fetching Chợ Tốt {} listings", city.label()))?;
+            ads.extend(page.into_iter().filter(|ad| {
+                ad.is_home() && ad.orig_list_time.unwrap_or(ad.list_time) >= first_listed_floor
+            }));
+        }
+    }
     if ads.is_empty() {
         // An empty window would prune the whole seen-set and re-notify
         // everything next cycle; treat it as a feed hiccup instead.
@@ -518,9 +569,14 @@ async fn handle_message(
                 Err(e) => error!(user = %who, "failed to open bostad search: {e:#}"),
             }
         }
-        "/nhatrang" | "/nhatot" => {
-            info!(user = %who, command = cmd, "opening nhatot search UI");
-            let filters = nhatot_search::Filters::default();
+        "/nhatrang" | "/nhatot" | "/danang" => {
+            let city = if cmd == "/danang" {
+                nhatot::City::DaNang
+            } else {
+                nhatot::City::NhaTrang
+            };
+            info!(user = %who, command = cmd, city = city.label(), "opening nhatot search UI");
+            let filters = nhatot_search::Filters::for_city(city);
             let (text, keyboard) = nhatot_search::render(nhatot_search::Screen::Main, &filters);
             match telegram::send_keyboard(bot, chat_id, &text, keyboard).await {
                 Ok(message) => {
@@ -531,7 +587,7 @@ async fn handle_message(
         }
         "/start" | "/help" => {
             info!(user = %who, command = cmd, "help requested");
-            let _ = telegram::send_note(bot, chat_id, HELP).await;
+            let _ = telegram::send_note(bot, chat_id, &help_text(cfg, chat_id)).await;
         }
         other => {
             debug!(user = %who, text = other, "ignoring non-command message");
@@ -575,7 +631,7 @@ async fn handle_callback(
             bot,
             chat_id,
             message_id,
-            "This search expired — send /search, /bostad or /nhatrang to start a new one.",
+            "This search expired — send /search, /bostad, /nhatrang or /danang to start a new one.",
         )
         .await;
         return;
@@ -666,7 +722,8 @@ async fn handle_callback(
                     min_rent = ?filters.min_rent,
                     max_rent = ?filters.max_rent,
                     min_size = ?filters.min_size,
-                    wards = %filters.ward_summary(),
+                    city = filters.city.label(),
+                    places = %filters.place_summary(),
                     "nhatot search triggered"
                 );
                 sessions.remove(&key);
@@ -822,7 +879,16 @@ async fn run_nhatot_search(
     chat_id: i64,
     filters: nhatot_search::Filters,
 ) {
-    let ads = match nhatot::fetch_rent(&http, &cfg, filters.category.cg(), NHATOT_PAGES).await {
+    let ads = match nhatot::fetch_rent(
+        &http,
+        &cfg,
+        filters.city,
+        &filters.area_codes(),
+        filters.category.cg(),
+        NHATOT_SEARCH_PAGES,
+    )
+    .await
+    {
         Ok(v) => v,
         Err(e) => {
             error!("nhatot search fetch failed: {e:#}");
@@ -839,7 +905,11 @@ async fn run_nhatot_search(
     let total = matches.len();
 
     if total == 0 {
-        info!(wards = %filters.ward_summary(), "nhatot search returned no matches");
+        info!(
+            city = filters.city.label(),
+            places = %filters.place_summary(),
+            "nhatot search returned no matches"
+        );
         let _ = telegram::send_note(&bot, chat_id, "No matches for those filters.").await;
         return;
     }
@@ -851,7 +921,8 @@ async fn run_nhatot_search(
     }
 
     info!(
-        wards = %filters.ward_summary(),
+        city = filters.city.label(),
+        places = %filters.place_summary(),
         total_matches = total,
         posting = matches.len(),
         "nhatot search complete"
@@ -918,4 +989,54 @@ async fn translate_ad(ad: &nhatot::Ad, translator: Option<&deepl::Translator>) -
         Err(e) => warn!(id = ad.ad_id, "translation failed, posting original: {e:#}"),
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg() -> Config {
+        Config {
+            bot_token: "t".to_string(),
+            chat_id: 1,
+            area: "se/stockholm".to_string(),
+            home_types: vec!["apartment".to_string()],
+            interval: Duration::from_secs(3 * 3600),
+            max_notify: 40,
+            endpoint: String::new(),
+            bostad_chat_id: Some(2),
+            bostad_interval: Duration::from_secs(10 * 60),
+            bostad_endpoint: String::new(),
+            nhatot_chat_id: Some(3),
+            nhatot_interval: Duration::from_secs(30 * 60),
+            nhatot_endpoint: String::new(),
+            nhatot_cities: vec![nhatot::City::NhaTrang, nhatot::City::DaNang],
+            nhatot_category: 1000,
+            deepl_api_key: None,
+            deepl_endpoint: None,
+        }
+    }
+
+    #[test]
+    fn help_mentions_only_this_chats_schedule() {
+        let cfg = cfg();
+        let qasa = help_text(&cfg, 1);
+        assert!(qasa.contains("/nhatrang"));
+        assert!(qasa.contains("Stockholm apartments from Qasa here every 3 hours"));
+        assert!(!qasa.contains("Bostad snabbt ads here"));
+        assert!(!qasa.contains("Nha Trang rentals from"));
+
+        let bostad = help_text(&cfg, 2);
+        assert!(bostad.contains("Bostad snabbt ads here every 10 minutes"));
+        assert!(!bostad.contains("Qasa here"));
+
+        let nhatot = help_text(&cfg, 3);
+        assert!(nhatot.contains("Nha Trang and Da Nang rentals from Chợ Tốt here every 30 minutes"));
+        assert!(nhatot.contains("/danang"));
+
+        // A DM (or any other chat) gets the command list only.
+        let dm = help_text(&cfg, 99);
+        assert_eq!(dm, HELP_COMMANDS);
+        assert!(!dm.contains("I also post"));
+    }
 }

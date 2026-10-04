@@ -45,16 +45,21 @@ listings and pushes each new one to a Telegram chat. The query sets
   queue and always pass it. The whole feed is one JSON array, so all filters
   are client-side. Sessions for
   both UIs share one map via the `Session` enum in `main.rs`.
-- **`/nhatrang`** (alias `/nhatot`) — same filter-UI pattern
-  (`nhatot_search::{Screen, render, apply, passes}`) over **Chợ Tốt** (the
-  JSON backend of nhatot.com) for Nha Trang, Vietnam: age (default 7 days,
-  measured from `list_time`, which a bump rewrites — so "listed or bumped
-  within"), property type (apartment / house / both — drives the API's `cg`
-  code), ward multi-select (11 wards, labels matched verbatim against
-  `ward_name`), min rooms, min/max rent in VND, min size m². Everything but
-  the type is client-side over the newest `NHATOT_PAGES` × 50 ads. Sessions for all three UIs share one map via the
+- **`/nhatrang`** (alias `/nhatot`) and **`/danang`** — same filter-UI pattern
+  (`nhatot_search::{Screen, render, apply, passes}`, parameterised by
+  `nhatot::City`) over **Chợ Tốt** (the JSON backend of nhatot.com): age
+  (default 7 days, measured from `list_time`, which a bump rewrites — so
+  "listed or bumped within"), property type (apartment / house / both —
+  drives the API's `cg` code), a place multi-select (Nha Trang: 11 wards
+  matched verbatim against `ward_name`, client-side; Đà Nẵng: 7 districts
+  matched against `area_name` *and* sent to the API as comma-separated
+  `area_v2` codes, which it unions), min rooms, min/max rent in VND, min size
+  m². The rest is client-side over the newest `NHATOT_SEARCH_PAGES` × 50 ads. Sessions for all three UIs share one map via the
   `Session` enum in `main.rs`.
-- **`/start` / `/help`** — usage. Commands are honored from the configured
+- **`/start` / `/help`** — usage: the command list, plus one line about the
+  scheduled posts *that chat* receives (`main::help_text`, built from the
+  configured intervals); DMs and other chats get the commands only. Commands
+  are honored from the configured
   `CHAT_ID`, from `BOSTAD_CHAT_ID`, from `NHATOT_CHAT_ID`, and from any private
   (direct-message) chat; other group chats are ignored. Scheduled notifications still go only to their
   configured chat.
@@ -86,10 +91,27 @@ the `/bostad` command works regardless).
 
 `nhatot.rs` polls **Chợ Tốt's** public ad-listing API — the JSON backend of
 nhatot.com (the property section of Chợ Tốt, Vietnam's Blocket) — for new
-rentals in Nha Trang and posts them to `NHATOT_CHAT_ID` (unset ⇒ notifier
-disabled; `/nhatrang` works regardless). Default poll every 30 min: not
+rentals in the cities in `NHATOT_CITIES` (default Nha Trang + Đà Nẵng) and
+posts them to `NHATOT_CHAT_ID` (unset ⇒ notifier disabled; `/nhatrang` and
+`/danang` work regardless). Default poll every 30 min: not
 first-come-first-served like Bostad snabbt, but faster than Qasa's 3 h.
 Everything below was verified live on 2026-10-04 — don't re-probe, extend.
+
+- **Cities** (`nhatot::City`): Nha Trang is `region_v2=7044` + `area_v2=704401`
+  (one area inside Khánh Hòa); Đà Nẵng is `region_v2=3017`, a region of its own
+  whose `area_v2` codes are districts (`301703` Hải Châu, `301702` Thanh Khê,
+  `301704` Sơn Trà, `301705` Ngũ Hành Sơn, `301701` Liên Chiểu, `301706` Cẩm
+  Lệ, `301707` Hòa Vang). Hence `ward_name` is the place in Nha Trang but
+  `area_name` (the district) in Đà Nẵng. **Volume differs 30×**: Đà Nẵng has
+  ~1.9k live apartment and ~1.5k house rentals, and its 100 newest apartment
+  ads spanned 12 hours (≈150–200/day, plus houses), against ~3–5/day in Nha
+  Trang. Two notifier rules exist because of that: it scans **one page per
+  city × category** (`cg=1000` would share a page across offices/land too, so
+  it fetches 1010 and 1020 separately; the window is ≤ 200 ids so the pinned
+  seen-set stays far under 4096 chars), and it **only posts ads first listed
+  within 48 h** (`orig_list_time`, falling back to `list_time`), because Đà
+  Nẵng sellers bump old ads constantly and every one bumped back into the
+  window would otherwise re-post as new.
 
 - `GET https://gateway.chotot.com/v1/public/ad-listing?region_v2=7044&area_v2=704401&cg=<cat>&st=u&limit=50&o=<offset>`.
   Unauthenticated, no Cloudflare challenge (the nhatot.com HTML *is*
@@ -114,10 +136,11 @@ Everything below was verified live on 2026-10-04 — don't re-probe, extend.
 - Public URL: `https://www.nhatot.com/{list_id}.htm` (redirects to the slug
   URL; verified in a browser). Message shows the title, price as `14M ₫/month`
   (from the numeric field; the Vietnamese `price_string` is the fallback),
-  size · bedrooms, street/ward · project, category in English, bump tag, and a
-  200-char body preview. `telegram::nhatot_location` dedups addresses —
-  sellers paste "Đường X, Phường Y, Thành phố Nha Trang, Khánh Hòa" into
-  `street_name` — and strips the Đường/Phường/Xã prefixes.
+  size · bedrooms, street, ward, district (Đà Nẵng), city · project, category
+  in English, bump tag, and a 200-char body preview.
+  `telegram::nhatot_location` dedups addresses — sellers paste "Đường X,
+  Phường Y, Thành phố Nha Trang, Khánh Hòa" into `street_name` — and strips
+  the Đường/Phường/Xã/Quận prefixes (`nhatot::strip_place_prefix`).
 - **Translation (`deepl.rs`):** with `DEEPL_API_KEY` set, `main::translate_ad`
   sends each ad's title and the first 500 chars of its body to DeepL
   (`VI` → `EN-US`, one request per ad, right before sending) and tags the
@@ -126,9 +149,11 @@ Everything below was verified live on 2026-10-04 — don't re-probe, extend.
   host rejects them). Hand-rolled on the shared reqwest client; the `deepl`
   crate (0.8, reqwest 0.13) was considered and skipped as six crates for one
   POST. The free plan's 500k chars/month is ample: ~5 ads/day × ≤600 chars.
-- Wards in `nhatot_search.rs` are the 11 `ward_name` values present in the
-  live feed (Phước Hải, Lộc Thọ, Vĩnh Phước, Vĩnh Hòa, Phước Long, Xương
-  Huân, Vĩnh Trường, Ngọc Hiệp, Xã Vĩnh Thái, Tân Lập, Vĩnh Hải).
+- Nha Trang wards in `nhatot.rs` are the 11 `ward_name` values present in
+  the live feed (Phước Hải, Lộc Thọ, Vĩnh Phước, Vĩnh Hòa, Phước Long, Xương
+  Huân, Vĩnh Trường, Ngọc Hiệp, Xã Vĩnh Thái, Tân Lập, Vĩnh Hải); the Đà
+  Nẵng districts come from the regions endpoint (Hoàng Sa, the islands, left
+  out).
 - **Other Vietnamese sources, researched and rejected (2026-10-04):**
   - *Batdongsan.com.vn*: Cloudflare managed challenge on every path (even
     `robots.txt`), and any query string (`?sortValue=1`) hits a WAF block
@@ -194,8 +219,8 @@ slugs silently return a country-wide result, so only verified ones are included.
   `MAX_NOTIFY_PER_CYCLE` (default `40`, shared by both notifiers),
   `QASA_ENDPOINT`, `BOSTAD_POLL_INTERVAL_MINS` (default `10`),
   `BOSTAD_ENDPOINT`, `NHATOT_POLL_INTERVAL_MINS` (default `30`),
-  `NHATOT_ENDPOINT`, `NHATOT_REGION` (default `7044`), `NHATOT_AREA` (default
-  `704401`), `NHATOT_CATEGORY` (default `1000`), `RUST_LOG`.
+  `NHATOT_ENDPOINT`, `NHATOT_CITIES` (default `nhatrang,danang`),
+  `NHATOT_CATEGORY` (default `1000`), `RUST_LOG`.
 
 Non-secret defaults live in `.github/fly.toml [env]` and the image `config.Env`;
 secrets come from `fly secrets set`. Locally, `make run` reads `BOT_TOKEN`/

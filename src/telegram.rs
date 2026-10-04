@@ -628,49 +628,51 @@ fn format_nhatot_listing(ad: &nhatot::Ad) -> String {
     lines.join("\n")
 }
 
-/// Street and ward, de-duplicated. Sellers often paste the whole address
-/// into `street_name` ("Đường Phạm Văn Đồng, Phường Vĩnh Phước, Thành phố
-/// Nha Trang, Khánh Hòa"), so each comma part is dropped when it repeats the
-/// ward, city or province, and the Vietnamese "Đường"/"Phường"/"Xã"
-/// (street/ward/commune) prefixes are stripped.
+/// Street, ward, district and city, de-duplicated. Sellers often paste the
+/// whole address into `street_name` ("Đường Phạm Văn Đồng, Phường Vĩnh Phước,
+/// Thành phố Nha Trang, Khánh Hòa"), so each comma part is dropped when it
+/// repeats the ward, district, city or province, and the Vietnamese place
+/// prefixes (Đường/Phường/Xã/Quận…) are stripped. `area_name` is a district
+/// in Đà Nẵng (kept) but the city itself in Nha Trang (dropped in favour of
+/// the city label).
 fn nhatot_location(ad: &nhatot::Ad) -> Vec<String> {
-    let ward = nonempty(&ad.ward_name).map(strip_place_prefix);
-    let city = nonempty(&ad.area_name).map(strip_place_prefix);
+    let strip = nhatot::strip_place_prefix;
+    let ward = nonempty(&ad.ward_name).map(strip);
+    let district = nonempty(&ad.area_name)
+        .filter(|a| !a.starts_with("Thành phố"))
+        .map(strip);
+    let area = nonempty(&ad.area_name).map(strip);
     let province = nonempty(&ad.region_name).map(str::trim);
+    let city = ad.city.map(nhatot::City::label);
     let is_redundant = |part: &str| {
         let same = |other: Option<&str>| other.is_some_and(|o| o.eq_ignore_ascii_case(part));
-        same(ward) || same(city) || same(province)
+        same(ward) || same(area) || same(province) || same(city)
     };
 
     let mut parts: Vec<String> = Vec::new();
+    let mut push = |part: &str| {
+        if !part.is_empty() && !parts.iter().any(|p| p.eq_ignore_ascii_case(part)) {
+            parts.push(part.to_string());
+        }
+    };
     if let Some(street) = nonempty(&ad.street_name) {
         for raw in street.split(',') {
-            let part = strip_place_prefix(raw.trim());
-            if part.is_empty() || is_redundant(part) {
-                continue;
-            }
-            if !parts.iter().any(|p| p.eq_ignore_ascii_case(part)) {
-                parts.push(part.to_string());
+            let part = strip(raw);
+            if !is_redundant(part) {
+                push(part);
             }
         }
     }
     if let Some(ward) = ward {
-        if !parts.iter().any(|p| p.eq_ignore_ascii_case(ward)) {
-            parts.push(ward.to_string());
-        }
+        push(ward);
+    }
+    if let Some(district) = district {
+        push(district);
+    }
+    if let Some(city) = city {
+        push(city);
     }
     parts
-}
-
-/// Drop a leading Vietnamese place-type word: Đường (street), Phường (ward),
-/// Xã (commune), Thành phố (city), Tỉnh (province).
-fn strip_place_prefix(s: &str) -> &str {
-    let s = s.trim();
-    ["Đường ", "Phường ", "Xã ", "Thành phố ", "Tỉnh "]
-        .iter()
-        .find_map(|prefix| s.strip_prefix(prefix))
-        .unwrap_or(s)
-        .trim()
 }
 
 /// Trimmed string, or `None` when absent or blank.
@@ -819,6 +821,7 @@ mod tests {
             category: Some(1010),
             category_name: Some("Căn hộ/Chung cư".to_string()),
             translated: false,
+            city: Some(nhatot::City::NhaTrang),
         }
     }
 
@@ -830,7 +833,7 @@ mod tests {
         // Numeric price wins over the Vietnamese price string.
         assert!(out.contains("💰 14M ₫/month"));
         assert!(out.contains("63 m² · 2 bedrooms"));
-        assert!(out.contains("📍 Trịnh Hoài Đức, Vĩnh Hòa · Mường Thanh Viễn Triều"));
+        assert!(out.contains("📍 Trịnh Hoài Đức, Vĩnh Hòa, Nha Trang · Mường Thanh Viễn Triều"));
         // 1790570223 = 2026-09-28 UTC.
         assert!(out.contains("🏷 Apartment · ↻ bumped (first listed 2026-09-28)"));
         assert!(!out.contains("translated"));
@@ -849,7 +852,7 @@ mod tests {
         assert!(out.contains("💰 14 triệu/tháng"));
         assert!(out.contains("1 bedroom\n"));
         assert!(!out.contains("bumped"));
-        assert!(out.contains("📍 Trịnh Hoài Đức, Vĩnh Hòa\n"));
+        assert!(out.contains("📍 Trịnh Hoài Đức, Vĩnh Hòa, Nha Trang\n"));
         assert!(out.contains("🏷 Apartment · 🌐 translated"));
         assert!(!out.contains("📝"));
     }
@@ -861,16 +864,30 @@ mod tests {
             "Đường Phạm Văn Đồng, Phường Vĩnh Phước, Thành phố Nha Trang, Khánh Hòa".to_string(),
         );
         ad.ward_name = Some("Phường Vĩnh Phước".to_string());
-        assert_eq!(nhatot_location(&ad), ["Phạm Văn Đồng", "Vĩnh Phước"]);
+        assert_eq!(
+            nhatot_location(&ad),
+            ["Phạm Văn Đồng", "Vĩnh Phước", "Nha Trang"]
+        );
 
         // Ward-only ad.
         ad.street_name = None;
-        assert_eq!(nhatot_location(&ad), ["Vĩnh Phước"]);
+        assert_eq!(nhatot_location(&ad), ["Vĩnh Phước", "Nha Trang"]);
 
         // Commune prefix, and a street equal to the ward collapses to one part.
         ad.ward_name = Some("Xã Vĩnh Thái".to_string());
         ad.street_name = Some("Vĩnh Thái".to_string());
-        assert_eq!(nhatot_location(&ad), ["Vĩnh Thái"]);
+        assert_eq!(nhatot_location(&ad), ["Vĩnh Thái", "Nha Trang"]);
+
+        // Đà Nẵng: `area_name` is a district and is kept, before the city.
+        ad.city = Some(nhatot::City::DaNang);
+        ad.region_name = Some("Đà Nẵng".to_string());
+        ad.area_name = Some("Quận Sơn Trà".to_string());
+        ad.ward_name = Some("Phường An Hải Tây".to_string());
+        ad.street_name = Some("Đường Ngô Quyền, Quận Sơn Trà, Đà Nẵng".to_string());
+        assert_eq!(
+            nhatot_location(&ad),
+            ["Ngô Quyền", "An Hải Tây", "Sơn Trà", "Da Nang"]
+        );
 
         // Houses get the English category label too.
         ad.category = Some(1020);

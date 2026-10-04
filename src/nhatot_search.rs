@@ -1,13 +1,17 @@
-//! Interactive `/nhatrang` filter builder over Chợ Tốt's Nha Trang listings.
+//! Interactive `/nhatrang` and `/danang` filter builders over Chợ Tốt
+//! listings — one module, parameterised by [`City`].
 //!
 //! Same shape as `bostad_search` (main screen → one sub-menu per filter).
-//! The category drives the API's `cg` parameter; everything else is applied
+//! The category drives the API's `cg` parameter and, for Đà Nẵng, selected
+//! districts go to the API as `area_v2` codes; everything else is applied
 //! client-side over the newest pages. Rents are VND per month — Nha Trang
-//! apartments run roughly 5–55 million, typically 12–20.
+//! apartments run roughly 5–55 million, typically 12–20; Đà Nẵng is similar.
 
 use frankenstein::types::{InlineKeyboardButton, InlineKeyboardMarkup};
 
-use crate::nhatot::{Ad, CATEGORY_ALL, CATEGORY_APARTMENT, CATEGORY_HOUSE};
+use crate::nhatot::{
+    strip_place_prefix, Ad, City, CATEGORY_ALL, CATEGORY_APARTMENT, CATEGORY_HOUSE,
+};
 use crate::search::{button, mark, menu};
 
 /// Minimum-room presets; `0` means "any".
@@ -68,62 +72,13 @@ impl Category {
     }
 }
 
-/// Declare the `Ward` enum plus its `ALL`/`label` from one table. The labels
-/// are matched verbatim against the API's `ward_name` (list taken from the
-/// wards present in the live Nha Trang feed).
-macro_rules! declare_wards {
-    ($($variant:ident => $label:literal;)+) => {
-        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-        pub enum Ward {
-            $($variant,)+
-        }
-
-        impl Ward {
-            /// All wards, in display order.
-            pub const ALL: &'static [Ward] = &[$(Ward::$variant,)+];
-
-            pub fn label(self) -> &'static str {
-                match self { $(Ward::$variant => $label,)+ }
-            }
-        }
-    };
-}
-
-declare_wards! {
-    LocTho => "Phường Lộc Thọ";
-    PhuocHai => "Phường Phước Hải";
-    PhuocLong => "Phường Phước Long";
-    TanLap => "Phường Tân Lập";
-    XuongHuan => "Phường Xương Huân";
-    VinhHoa => "Phường Vĩnh Hòa";
-    VinhHai => "Phường Vĩnh Hải";
-    VinhPhuoc => "Phường Vĩnh Phước";
-    VinhTruong => "Phường Vĩnh Trường";
-    NgocHiep => "Phường Ngọc Hiệp";
-    VinhThai => "Xã Vĩnh Thái";
-}
-
-impl Ward {
-    fn from_index(i: usize) -> Option<Ward> {
-        Ward::ALL.get(i).copied()
-    }
-
-    /// Label without the "Phường"/"Xã" (ward/commune) prefix, for buttons.
-    pub fn short(self) -> &'static str {
-        let label = self.label();
-        label
-            .strip_prefix("Phường ")
-            .or_else(|| label.strip_prefix("Xã "))
-            .unwrap_or(label)
-    }
-}
-
-/// Current selection for an in-progress /nhatrang search.
+/// Current selection for an in-progress city search.
 #[derive(Clone, Debug)]
 pub struct Filters {
+    pub city: City,
     pub category: Category,
-    /// Selected wards; empty = the whole city.
-    pub wards: Vec<Ward>,
+    /// Selected place labels (wards or districts, per city); empty = whole city.
+    pub places: Vec<&'static str>,
     /// Minimum room count; 0 = any.
     pub min_rooms: u8,
     /// Min/max monthly rent in VND; None = any.
@@ -137,9 +92,16 @@ pub struct Filters {
 
 impl Default for Filters {
     fn default() -> Self {
+        Filters::for_city(City::NhaTrang)
+    }
+}
+
+impl Filters {
+    pub fn for_city(city: City) -> Self {
         Self {
+            city,
             category: Category::Apartment,
-            wards: Vec::new(),
+            places: Vec::new(),
             min_rooms: 0,
             min_rent: None,
             max_rent: None,
@@ -147,15 +109,15 @@ impl Default for Filters {
             max_age_hours: Some(DEFAULT_AGE_HOURS),
         }
     }
-}
 
-impl Filters {
-    /// Short human-readable ward summary for labels/messages.
-    pub fn ward_summary(&self) -> String {
-        let names: Vec<&str> = Ward::ALL
+    /// Short human-readable place summary for labels/messages.
+    pub fn place_summary(&self) -> String {
+        let names: Vec<&str> = self
+            .city
+            .places()
             .iter()
-            .filter(|w| self.wards.contains(w))
-            .map(|w| w.short())
+            .filter(|p| self.places.contains(&p.label))
+            .map(|p| strip_place_prefix(p.label))
             .collect();
         match names.as_slice() {
             [] => "Whole city".to_string(),
@@ -165,11 +127,22 @@ impl Filters {
         }
     }
 
-    fn toggle_ward(&mut self, ward: Ward) {
-        if let Some(pos) = self.wards.iter().position(|w| *w == ward) {
-            self.wards.remove(pos);
+    /// `area_v2` codes to send to the API for the selected places (only
+    /// districts have them; ward selections are client-side).
+    pub fn area_codes(&self) -> Vec<&'static str> {
+        self.city
+            .places()
+            .iter()
+            .filter(|p| self.places.contains(&p.label))
+            .filter_map(|p| p.area_v2)
+            .collect()
+    }
+
+    fn toggle_place(&mut self, label: &'static str) {
+        if let Some(pos) = self.places.iter().position(|p| *p == label) {
+            self.places.remove(pos);
         } else {
-            self.wards.push(ward);
+            self.places.push(label);
         }
     }
 }
@@ -184,7 +157,7 @@ pub enum Screen {
     MinRent,
     MaxRent,
     Size,
-    Ward,
+    Place,
 }
 
 /// What the caller should do after a button press.
@@ -208,10 +181,10 @@ pub fn apply(filters: &mut Filters, data: &str) -> Action {
         "menu:minrent" => return Action::Show(Screen::MinRent),
         "menu:maxrent" => return Action::Show(Screen::MaxRent),
         "menu:size" => return Action::Show(Screen::Size),
-        "menu:ward" => return Action::Show(Screen::Ward),
-        "wardclear" => {
-            filters.wards.clear();
-            return Action::Show(Screen::Ward);
+        "menu:place" => return Action::Show(Screen::Place),
+        "placeclear" => {
+            filters.places.clear();
+            return Action::Show(Screen::Place);
         }
         _ => {}
     }
@@ -261,20 +234,25 @@ pub fn apply(filters: &mut Filters, data: &str) -> Action {
             }
             Action::Show(Screen::Main)
         }
-        // Wards are multi-select: toggle and stay on the ward screen.
-        "ward" => {
-            if let Some(w) = val.parse::<usize>().ok().and_then(Ward::from_index) {
-                filters.toggle_ward(w);
+        // Places are multi-select: toggle and stay on the place screen.
+        "place" => {
+            if let Some(p) = val
+                .parse::<usize>()
+                .ok()
+                .and_then(|i| filters.city.places().get(i))
+            {
+                filters.toggle_place(p.label);
             }
-            Action::Show(Screen::Ward)
+            Action::Show(Screen::Place)
         }
         _ => Action::Ignore,
     }
 }
 
-/// Does an ad pass all filters? The category also drives the fetch, so this
-/// only matters for `Both`; the rest is purely client-side. `now_ms` is the
-/// current time in epoch milliseconds (the unit `list_time` uses).
+/// Does an ad pass all filters? The category (and, for Đà Nẵng, the
+/// districts) also drive the fetch, so those checks mostly matter for `Both`
+/// and for wards; the rest is purely client-side. `now_ms` is the current
+/// time in epoch milliseconds (the unit `list_time` uses).
 pub fn passes(filters: &Filters, ad: &Ad, now_ms: i64) -> bool {
     if !filters.category.matches(ad) {
         return false;
@@ -284,11 +262,11 @@ pub fn passes(filters: &Filters, ad: &Ad, now_ms: i64) -> bool {
             return false;
         }
     }
-    if !filters.wards.is_empty() {
-        let in_selected = ad
-            .ward_name
-            .as_deref()
-            .is_some_and(|w| filters.wards.iter().any(|sel| sel.label() == w));
+    if !filters.places.is_empty() {
+        let in_selected = filters
+            .city
+            .place_of(ad)
+            .is_some_and(|p| filters.places.contains(&p));
         if !in_selected {
             return false;
         }
@@ -342,9 +320,12 @@ pub fn render(screen: Screen, filters: &Filters) -> (String, InlineKeyboardMarku
             rent_keyboard(filters.max_rent, "maxrent"),
         ),
         Screen::Size => ("📐 Minimum size (m²):".to_string(), size_keyboard(filters)),
-        Screen::Ward => (
-            "📍 Tap wards to toggle (none selected = whole city):".to_string(),
-            ward_keyboard(filters),
+        Screen::Place => (
+            format!(
+                "📍 Tap {}s to toggle (none selected = whole city):",
+                filters.city.place_noun()
+            ),
+            place_keyboard(filters),
         ),
     }
 }
@@ -352,15 +333,25 @@ pub fn render(screen: Screen, filters: &Filters) -> (String, InlineKeyboardMarku
 /// A multi-line summary of the active filters, for the "Searching…" message.
 pub fn describe(f: &Filters) -> String {
     format!(
-        "⏱ Age: {}\n🗂 Type: {}\n📍 Ward: {}\n🛏 Rooms: {}\n💰 Rent: {}–{}\n📐 Min size: {}",
+        "🏙 City: {}\n⏱ Age: {}\n🗂 Type: {}\n📍 {}: {}\n🛏 Rooms: {}\n💰 Rent: {}–{}\n📐 Min size: {}",
+        f.city.label(),
         age_text(f.max_age_hours),
         f.category.label(),
-        f.ward_summary(),
+        capitalize(f.city.place_noun()),
+        f.place_summary(),
         rooms_text(f.min_rooms),
         rent_text(f.min_rent),
         rent_text(f.max_rent),
         size_text(f.min_size),
     )
+}
+
+fn capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
 }
 
 fn rooms_text(min_rooms: u8) -> String {
@@ -405,14 +396,16 @@ fn size_text(size: Option<u32>) -> String {
 
 fn main_text(f: &Filters) -> String {
     format!(
-        "🔍 Search Nha Trang rentals (Chợ Tốt)\n\n⏱ Age: {}\n🗂 Type: {}\n🛏 Rooms: {}\n💰 Rent: {}–{} VND/month\n📐 Min size: {}\n📍 Ward: {}\n\nTap a field to change it, then Search.",
+        "🔍 Search {} rentals (Chợ Tốt)\n\n⏱ Age: {}\n🗂 Type: {}\n🛏 Rooms: {}\n💰 Rent: {}–{} VND/month\n📐 Min size: {}\n📍 {}: {}\n\nTap a field to change it, then Search.",
+        f.city.label(),
         age_text(f.max_age_hours),
         f.category.label(),
         rooms_text(f.min_rooms),
         rent_text(f.min_rent),
         rent_text(f.max_rent),
         size_text(f.min_size),
-        f.ward_summary(),
+        capitalize(f.city.place_noun()),
+        f.place_summary(),
     )
 }
 
@@ -444,8 +437,12 @@ fn main_keyboard(f: &Filters) -> InlineKeyboardMarkup {
             "menu:size",
         )],
         vec![button(
-            format!("📍 Ward: {}", f.ward_summary()),
-            "menu:ward",
+            format!(
+                "📍 {}: {}",
+                capitalize(f.city.place_noun()),
+                f.place_summary()
+            ),
+            "menu:place",
         )],
         vec![button("🔎 Search".to_string(), "go")],
     ];
@@ -533,15 +530,20 @@ fn size_keyboard(f: &Filters) -> InlineKeyboardMarkup {
     menu(buttons, 3)
 }
 
-/// Multi-select ward picker: a toggle grid plus Clear / Done controls.
-fn ward_keyboard(f: &Filters) -> InlineKeyboardMarkup {
-    let mut inline_keyboard: Vec<Vec<InlineKeyboardButton>> = Ward::ALL
+/// Multi-select place picker: a toggle grid plus Clear / Done controls.
+fn place_keyboard(f: &Filters) -> InlineKeyboardMarkup {
+    let mut inline_keyboard: Vec<Vec<InlineKeyboardButton>> = f
+        .city
+        .places()
         .iter()
         .enumerate()
-        .map(|(i, ward)| {
+        .map(|(i, place)| {
             button(
-                mark(f.wards.contains(ward), ward.short()),
-                &format!("ward:{i}"),
+                mark(
+                    f.places.contains(&place.label),
+                    strip_place_prefix(place.label),
+                ),
+                &format!("place:{i}"),
             )
         })
         .collect::<Vec<_>>()
@@ -549,7 +551,7 @@ fn ward_keyboard(f: &Filters) -> InlineKeyboardMarkup {
         .map(<[InlineKeyboardButton]>::to_vec)
         .collect();
     inline_keyboard.push(vec![
-        button("🧹 Clear".to_string(), "wardclear"),
+        button("🧹 Clear".to_string(), "placeclear"),
         button("✅ Done".to_string(), "back"),
     ]);
     InlineKeyboardMarkup::builder()
@@ -588,12 +590,13 @@ mod tests {
             size,
             ward_name: Some(ward.to_string()),
             street_name: None,
-            area_name: None,
+            area_name: Some("Thành phố Nha Trang".to_string()),
             region_name: None,
             pty_project_name: None,
             category: Some(category),
             category_name: None,
             translated: false,
+            city: Some(City::NhaTrang),
         }
     }
 
@@ -632,129 +635,97 @@ mod tests {
             min_size: Some(50),
             ..Filters::default()
         };
-        let ok = ad(
-            1010,
-            "Phường Phước Hải",
-            Some(2),
-            Some(14_000_000),
-            Some(63.0),
-        );
-        assert!(pass(&f, &ok));
+        let w = "Phường Phước Hải";
+        assert!(pass(
+            &f,
+            &ad(1010, w, Some(2), Some(14_000_000), Some(63.0))
+        ));
         assert!(!pass(
             &f,
-            &ad(
-                1010,
-                "Phường Phước Hải",
-                Some(1),
-                Some(14_000_000),
-                Some(63.0)
-            )
+            &ad(1010, w, Some(1), Some(14_000_000), Some(63.0))
         )); // rooms
+        assert!(!pass(&f, &ad(1010, w, None, Some(14_000_000), Some(63.0)))); // unknown rooms
         assert!(!pass(
             &f,
-            &ad(1010, "Phường Phước Hải", None, Some(14_000_000), Some(63.0))
-        )); // unknown rooms
-        assert!(!pass(
-            &f,
-            &ad(
-                1010,
-                "Phường Phước Hải",
-                Some(2),
-                Some(8_000_000),
-                Some(63.0)
-            )
+            &ad(1010, w, Some(2), Some(8_000_000), Some(63.0))
         )); // under min
         assert!(!pass(
             &f,
-            &ad(
-                1010,
-                "Phường Phước Hải",
-                Some(2),
-                Some(16_000_000),
-                Some(63.0)
-            )
+            &ad(1010, w, Some(2), Some(16_000_000), Some(63.0))
         )); // over max
         assert!(!pass(
             &f,
-            &ad(
-                1010,
-                "Phường Phước Hải",
-                Some(2),
-                Some(14_000_000),
-                Some(45.0)
-            )
+            &ad(1010, w, Some(2), Some(14_000_000), Some(45.0))
         )); // small
-        assert!(!pass(
-            &f,
-            &ad(1010, "Phường Phước Hải", Some(2), Some(14_000_000), None)
-        )); // unknown size
+        assert!(!pass(&f, &ad(1010, w, Some(2), Some(14_000_000), None))); // unknown size
     }
 
     #[test]
-    fn ward_multiselect_matches_feed_labels() {
+    fn nha_trang_wards_multiselect() {
         let mut f = Filters::default();
-        assert_eq!(f.ward_summary(), "Whole city");
+        assert_eq!(f.city, City::NhaTrang);
+        assert_eq!(f.place_summary(), "Whole city");
 
-        let vinh_hoa = Ward::ALL
+        let vinh_hoa = City::NhaTrang
+            .places()
             .iter()
-            .position(|w| w.label() == "Phường Vĩnh Hòa")
+            .position(|p| p.label == "Phường Vĩnh Hòa")
             .unwrap();
         assert!(matches!(
-            apply(&mut f, "ward:0"),
-            Action::Show(Screen::Ward)
+            apply(&mut f, "place:0"),
+            Action::Show(Screen::Place)
         ));
         assert!(matches!(
-            apply(&mut f, &format!("ward:{vinh_hoa}")),
-            Action::Show(Screen::Ward)
+            apply(&mut f, &format!("place:{vinh_hoa}")),
+            Action::Show(Screen::Place)
         ));
-        assert_eq!(f.ward_summary(), "Lộc Thọ, Vĩnh Hòa");
+        assert_eq!(f.place_summary(), "Lộc Thọ, Vĩnh Hòa");
+        assert!(f.area_codes().is_empty()); // wards are client-side only
         assert!(pass(&f, &ad(1010, "Phường Vĩnh Hòa", None, None, None)));
         assert!(!pass(&f, &ad(1010, "Phường Vĩnh Phước", None, None, None)));
 
-        // Toggling again removes it.
-        apply(&mut f, &format!("ward:{vinh_hoa}"));
+        // Toggling again removes it; Clear returns to "whole city".
+        apply(&mut f, &format!("place:{vinh_hoa}"));
         assert!(!pass(&f, &ad(1010, "Phường Vĩnh Hòa", None, None, None)));
-
-        // Clear returns to "whole city".
         assert!(matches!(
-            apply(&mut f, "wardclear"),
-            Action::Show(Screen::Ward)
+            apply(&mut f, "placeclear"),
+            Action::Show(Screen::Place)
         ));
         assert!(pass(&f, &ad(1010, "Phường Vĩnh Phước", None, None, None)));
-        assert_eq!(Ward::VinhThai.short(), "Vĩnh Thái");
+        // Out-of-range index is ignored.
+        assert!(matches!(
+            apply(&mut f, "place:99"),
+            Action::Show(Screen::Place)
+        ));
+        assert!(f.places.is_empty());
     }
 
     #[test]
-    fn apply_updates_and_routes() {
-        let mut f = Filters::default();
-        assert!(matches!(
-            apply(&mut f, "menu:size"),
-            Action::Show(Screen::Size)
-        ));
-        assert!(matches!(
-            apply(&mut f, "size:40"),
-            Action::Show(Screen::Main)
-        ));
-        assert_eq!(f.min_size, Some(40));
-        assert!(matches!(
-            apply(&mut f, "size:0"),
-            Action::Show(Screen::Main)
-        ));
-        assert_eq!(f.min_size, None);
-        assert!(matches!(
-            apply(&mut f, "size:33"),
-            Action::Show(Screen::Main)
-        )); // not a preset
-        assert_eq!(f.min_size, None);
-        assert!(matches!(apply(&mut f, "cat:1"), Action::Show(Screen::Main)));
-        assert_eq!(f.category, Category::House);
-        assert!(matches!(
-            apply(&mut f, "maxrent:15000000"),
-            Action::Show(Screen::Main)
-        ));
-        assert_eq!(f.max_rent, Some(15_000_000));
-        assert!(matches!(apply(&mut f, "go"), Action::Search));
-        assert!(matches!(apply(&mut f, "garbage"), Action::Ignore));
+    fn da_nang_districts_match_area_name_and_map_to_codes() {
+        let mut f = Filters::for_city(City::DaNang);
+        assert_eq!(f.place_summary(), "Whole city");
+        let son_tra = City::DaNang
+            .places()
+            .iter()
+            .position(|p| p.label == "Quận Sơn Trà")
+            .unwrap();
+        apply(&mut f, "place:0"); // Hải Châu
+        apply(&mut f, &format!("place:{son_tra}"));
+        assert_eq!(f.place_summary(), "Hải Châu, Sơn Trà");
+        assert_eq!(f.area_codes(), ["301703", "301704"]);
+
+        let mut dn = ad(1010, "Phường Mỹ An", None, None, None);
+        dn.city = Some(City::DaNang);
+        dn.area_name = Some("Quận Sơn Trà".to_string());
+        assert!(pass(&f, &dn));
+        dn.area_name = Some("Quận Ngũ Hành Sơn".to_string());
+        assert!(!pass(&f, &dn));
+
+        let (text, _) = render(Screen::Place, &f);
+        assert!(text.contains("Tap districts"));
+        assert!(main_text(&f).contains("Search Da Nang rentals"));
+        assert!(main_text(&f).contains("📍 District:"));
+        assert!(describe(&f).contains("🏙 City: Da Nang"));
     }
 
     #[test]
@@ -792,12 +763,36 @@ mod tests {
     }
 
     #[test]
-    fn ward_labels_are_unique() {
-        let mut seen = std::collections::HashSet::new();
-        for w in Ward::ALL {
-            assert!(seen.insert(w.label()), "duplicate ward {}", w.label());
-        }
-        assert_eq!(Ward::from_index(Ward::ALL.len()), None);
+    fn apply_updates_and_routes() {
+        let mut f = Filters::default();
+        assert!(matches!(
+            apply(&mut f, "menu:size"),
+            Action::Show(Screen::Size)
+        ));
+        assert!(matches!(
+            apply(&mut f, "size:40"),
+            Action::Show(Screen::Main)
+        ));
+        assert_eq!(f.min_size, Some(40));
+        assert!(matches!(
+            apply(&mut f, "size:0"),
+            Action::Show(Screen::Main)
+        ));
+        assert_eq!(f.min_size, None);
+        assert!(matches!(
+            apply(&mut f, "size:33"),
+            Action::Show(Screen::Main)
+        )); // not a preset
+        assert_eq!(f.min_size, None);
+        assert!(matches!(apply(&mut f, "cat:1"), Action::Show(Screen::Main)));
+        assert_eq!(f.category, Category::House);
+        assert!(matches!(
+            apply(&mut f, "maxrent:15000000"),
+            Action::Show(Screen::Main)
+        ));
+        assert_eq!(f.max_rent, Some(15_000_000));
+        assert!(matches!(apply(&mut f, "go"), Action::Search));
+        assert!(matches!(apply(&mut f, "garbage"), Action::Ignore));
     }
 
     #[test]
