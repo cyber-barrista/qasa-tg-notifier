@@ -2,8 +2,8 @@
 //! genuinely new Stockholm apartment listings and push them to a Telegram
 //! chat. Optionally also polls Bostadsförmedlingen's feed every few minutes
 //! for new first-come-first-served "Bostad snabbt" ads (a separate chat), and
-//! Chợ Tốt's listings for new Nha Trang rentals (another separate chat).
-//! Serves interactive `/search`, `/bostad` and `/nhatrang` filter UIs.
+//! Chợ Tốt's listings for new Đà Nẵng rentals (another separate chat).
+//! Serves interactive `/search`, `/bostad` and `/danang` filter UIs.
 
 mod bostad;
 mod bostad_search;
@@ -37,7 +37,7 @@ const SEARCH_SCAN_MAX: usize = 200;
 /// Pause between messages. Telegram caps sends to a single group at ~20/min,
 /// so ~3s spacing keeps us under it; the 429-retry in `telegram` is the backstop.
 const SEND_GAP: Duration = Duration::from_secs(3);
-/// Pages (50 ads each) a `/nhatrang` or `/danang` search scans per request.
+/// Pages (50 ads each) a `/danang` search scans per request.
 const NHATOT_SEARCH_PAGES: usize = 4;
 /// Pages the notifier scans per city × category each cycle. One page is
 /// plenty: Đà Nẵng's 50 newest apartment ads span ~6 h against a 30-min
@@ -57,8 +57,7 @@ const TRANSLATE_BODY_CHARS: usize = 500;
 const HELP_COMMANDS: &str = "QASA notifier.\n\
      • /search — open the Qasa filter UI (neighborhood, age, rooms, max rent).\n\
      • /bostad — open the Bostadsförmedlingen filter UI (category, kommun, rooms, rent, queue years).\n\
-     • /nhatrang — open the Nha Trang (Chợ Tốt) filter UI (age, type, ward, rooms, rent, size).\n\
-     • /danang — the same for Da Nang (districts instead of wards).";
+     • /danang — open the Da Nang (Chợ Tốt) filter UI (age, type, district, rooms, rent, size).";
 
 /// `/help` text for a given chat: the command list, plus a line about the
 /// scheduled posts *this* chat receives. Chats without a notifier (DMs,
@@ -569,12 +568,8 @@ async fn handle_message(
                 Err(e) => error!(user = %who, "failed to open bostad search: {e:#}"),
             }
         }
-        "/nhatrang" | "/nhatot" | "/danang" => {
-            let city = if cmd == "/danang" {
-                nhatot::City::DaNang
-            } else {
-                nhatot::City::NhaTrang
-            };
+        "/danang" => {
+            let city = nhatot::City::DaNang;
             info!(user = %who, command = cmd, city = city.label(), "opening nhatot search UI");
             let filters = nhatot_search::Filters::for_city(city);
             let (text, keyboard) = nhatot_search::render(nhatot_search::Screen::Main, &filters);
@@ -631,7 +626,7 @@ async fn handle_callback(
             bot,
             chat_id,
             message_id,
-            "This search expired — send /search, /bostad, /nhatrang or /danang to start a new one.",
+            "This search expired — send /search, /bostad or /danang to start a new one.",
         )
         .await;
         return;
@@ -871,7 +866,7 @@ async fn run_bostad_search(
     let _ = telegram::send_note(&bot, chat_id, &note).await;
 }
 
-/// Fetch, filter, and post the results of a completed /nhatrang search.
+/// Fetch, filter, and post the results of a completed /danang search.
 async fn run_nhatot_search(
     http: reqwest::Client,
     bot: Bot,
@@ -1010,7 +1005,7 @@ mod tests {
             nhatot_chat_id: Some(3),
             nhatot_interval: Duration::from_secs(30 * 60),
             nhatot_endpoint: String::new(),
-            nhatot_cities: vec![nhatot::City::NhaTrang, nhatot::City::DaNang],
+            nhatot_cities: vec![nhatot::City::DaNang],
             nhatot_category: 1000,
             deepl_api_key: None,
             deepl_endpoint: None,
@@ -1021,18 +1016,19 @@ mod tests {
     fn help_mentions_only_this_chats_schedule() {
         let cfg = cfg();
         let qasa = help_text(&cfg, 1);
-        assert!(qasa.contains("/nhatrang"));
+        assert!(qasa.contains("/danang"));
         assert!(qasa.contains("Stockholm apartments from Qasa here every 3 hours"));
         assert!(!qasa.contains("Bostad snabbt ads here"));
-        assert!(!qasa.contains("Nha Trang rentals from"));
+        assert!(!qasa.contains("Da Nang rentals from"));
 
         let bostad = help_text(&cfg, 2);
         assert!(bostad.contains("Bostad snabbt ads here every 10 minutes"));
         assert!(!bostad.contains("Qasa here"));
 
         let nhatot = help_text(&cfg, 3);
-        assert!(nhatot.contains("Nha Trang and Da Nang rentals from Chợ Tốt here every 30 minutes"));
+        assert!(nhatot.contains("Da Nang rentals from Chợ Tốt here every 30 minutes"));
         assert!(nhatot.contains("/danang"));
+        assert!(!nhatot.contains("/nhatrang"));
 
         // A DM (or any other chat) gets the command list only.
         let dm = help_text(&cfg, 99);

@@ -12,8 +12,8 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use frankenstein::client_reqwest::Bot;
 use frankenstein::methods::{
-    AnswerCallbackQueryParams, EditMessageTextParams, GetChatParams, PinChatMessageParams,
-    SendMessageParams,
+    AnswerCallbackQueryParams, DeleteMessageParams, EditMessageTextParams, GetChatParams,
+    PinChatMessageParams, SendMessageParams,
 };
 use frankenstein::types::{InlineKeyboardButton, InlineKeyboardMarkup, Message, ReplyMarkup};
 use frankenstein::AsyncTelegramApi;
@@ -110,9 +110,21 @@ async fn upsert_pinned(
                 .message_id(message.message_id)
                 .disable_notification(true)
                 .build();
-            bot.pin_chat_message(&pin)
-                .await
-                .context("pinning state message")?;
+            if let Err(e) = bot.pin_chat_message(&pin).await {
+                // Without the pin the message is useless and the next cycle
+                // would post another one: remove it and say what's missing.
+                let del = DeleteMessageParams::builder()
+                    .chat_id(chat_id)
+                    .message_id(message.message_id)
+                    .build();
+                if let Err(del_err) = bot.delete_message(&del).await {
+                    tracing::warn!("could not delete unpinned state message: {del_err:#}");
+                }
+                return Err(e).context(
+                    "pinning state message — make the bot an admin of the chat with the \
+                     \"Pin messages\" right",
+                );
+            }
         }
     }
     Ok(())
@@ -157,7 +169,7 @@ pub const BOSTAD_STATE: SeenLabel = SeenLabel {
 
 pub const NHATOT_STATE: SeenLabel = SeenLabel {
     title: "nhatot notifier state",
-    blurb: "Recent Nha Trang (Chợ Tốt) ad ids already notified — please don't unpin or delete.",
+    blurb: "Recent Da Nang (Chợ Tốt) ad ids already notified — please don't unpin or delete.",
 };
 
 /// Parsed contents of a seen-set chat's pinned state message.
@@ -632,9 +644,9 @@ fn format_nhatot_listing(ad: &nhatot::Ad) -> String {
 /// whole address into `street_name` ("Đường Phạm Văn Đồng, Phường Vĩnh Phước,
 /// Thành phố Nha Trang, Khánh Hòa"), so each comma part is dropped when it
 /// repeats the ward, district, city or province, and the Vietnamese place
-/// prefixes (Đường/Phường/Xã/Quận…) are stripped. `area_name` is a district
-/// in Đà Nẵng (kept) but the city itself in Nha Trang (dropped in favour of
-/// the city label).
+/// prefixes (Đường/Phường/Xã/Quận…) are stripped. `area_name` is the district
+/// (kept); for a city-level area ("Thành phố …") it is dropped in favour of
+/// the city label.
 fn nhatot_location(ad: &nhatot::Ad) -> Vec<String> {
     let strip = nhatot::strip_place_prefix;
     let ward = nonempty(&ad.ward_name).map(strip);
@@ -813,15 +825,15 @@ mod tests {
             price_string: Some("14 triệu/tháng".to_string()),
             rooms: Some(2),
             size: Some(63.0),
-            ward_name: Some("Phường Vĩnh Hòa".to_string()),
-            street_name: Some("Trịnh Hoài Đức".to_string()),
-            area_name: Some("Thành phố Nha Trang".to_string()),
-            region_name: Some("Khánh Hòa".to_string()),
-            pty_project_name: Some("Mường Thanh Viễn Triều".to_string()),
+            ward_name: Some("Phường An Hải Tây".to_string()),
+            street_name: Some("Ngô Quyền".to_string()),
+            area_name: Some("Quận Sơn Trà".to_string()),
+            region_name: Some("Đà Nẵng".to_string()),
+            pty_project_name: Some("Mường Thanh Sơn Trà".to_string()),
             category: Some(1010),
             category_name: Some("Căn hộ/Chung cư".to_string()),
             translated: false,
-            city: Some(nhatot::City::NhaTrang),
+            city: Some(nhatot::City::DaNang),
         }
     }
 
@@ -833,7 +845,7 @@ mod tests {
         // Numeric price wins over the Vietnamese price string.
         assert!(out.contains("💰 14M ₫/month"));
         assert!(out.contains("63 m² · 2 bedrooms"));
-        assert!(out.contains("📍 Trịnh Hoài Đức, Vĩnh Hòa, Nha Trang · Mường Thanh Viễn Triều"));
+        assert!(out.contains("📍 Ngô Quyền, An Hải Tây, Sơn Trà, Da Nang · Mường Thanh Sơn Trà"));
         // 1790570223 = 2026-09-28 UTC.
         assert!(out.contains("🏷 Apartment · ↻ bumped (first listed 2026-09-28)"));
         assert!(!out.contains("translated"));
@@ -852,7 +864,7 @@ mod tests {
         assert!(out.contains("💰 14 triệu/tháng"));
         assert!(out.contains("1 bedroom\n"));
         assert!(!out.contains("bumped"));
-        assert!(out.contains("📍 Trịnh Hoài Đức, Vĩnh Hòa, Nha Trang\n"));
+        assert!(out.contains("📍 Ngô Quyền, An Hải Tây, Sơn Trà, Da Nang\n"));
         assert!(out.contains("🏷 Apartment · 🌐 translated"));
         assert!(!out.contains("📝"));
     }
@@ -860,34 +872,24 @@ mod tests {
     #[test]
     fn nhatot_location_dedups_pasted_addresses() {
         let mut ad = nhatot_ad();
-        ad.street_name = Some(
-            "Đường Phạm Văn Đồng, Phường Vĩnh Phước, Thành phố Nha Trang, Khánh Hòa".to_string(),
-        );
-        ad.ward_name = Some("Phường Vĩnh Phước".to_string());
-        assert_eq!(
-            nhatot_location(&ad),
-            ["Phạm Văn Đồng", "Vĩnh Phước", "Nha Trang"]
-        );
-
-        // Ward-only ad.
-        ad.street_name = None;
-        assert_eq!(nhatot_location(&ad), ["Vĩnh Phước", "Nha Trang"]);
-
-        // Commune prefix, and a street equal to the ward collapses to one part.
-        ad.ward_name = Some("Xã Vĩnh Thái".to_string());
-        ad.street_name = Some("Vĩnh Thái".to_string());
-        assert_eq!(nhatot_location(&ad), ["Vĩnh Thái", "Nha Trang"]);
-
-        // Đà Nẵng: `area_name` is a district and is kept, before the city.
-        ad.city = Some(nhatot::City::DaNang);
-        ad.region_name = Some("Đà Nẵng".to_string());
-        ad.area_name = Some("Quận Sơn Trà".to_string());
-        ad.ward_name = Some("Phường An Hải Tây".to_string());
-        ad.street_name = Some("Đường Ngô Quyền, Quận Sơn Trà, Đà Nẵng".to_string());
+        // Sellers paste the whole address into the street field.
+        ad.street_name =
+            Some("Đường Ngô Quyền, Phường An Hải Tây, Quận Sơn Trà, Đà Nẵng".to_string());
         assert_eq!(
             nhatot_location(&ad),
             ["Ngô Quyền", "An Hải Tây", "Sơn Trà", "Da Nang"]
         );
+
+        // No street: ward, district, city.
+        ad.street_name = None;
+        assert_eq!(nhatot_location(&ad), ["An Hải Tây", "Sơn Trà", "Da Nang"]);
+
+        // A street equal to the ward collapses to one part; a city-level
+        // `area_name` is dropped in favour of the city label.
+        ad.ward_name = Some("Xã Hòa Bắc".to_string());
+        ad.street_name = Some("Hòa Bắc".to_string());
+        ad.area_name = Some("Thành phố Đà Nẵng".to_string());
+        assert_eq!(nhatot_location(&ad), ["Hòa Bắc", "Da Nang"]);
 
         // Houses get the English category label too.
         ad.category = Some(1020);

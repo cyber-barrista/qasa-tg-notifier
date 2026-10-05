@@ -38,71 +38,61 @@ pub const CATEGORY_HOUSE: u32 = 1020;
 /// All real estate; filter client-side with [`Ad::is_home`].
 pub const CATEGORY_ALL: u32 = 1000;
 
-/// A city the bot knows how to query. Nha Trang is one `area_v2` inside the
-/// Khánh Hòa region; Đà Nẵng is a region of its own whose `area_v2` codes are
-/// districts — so "place" means ward for one and district for the other.
+/// A city the bot knows how to query. Only Đà Nẵng today: it is a Chợ Tốt
+/// region of its own (`region_v2=3017`) whose `area_v2` codes are districts.
+/// (Nha Trang — `region_v2=7044`, `area_v2=704401`, wards in `ward_name` —
+/// was supported and removed; see CLAUDE.md if it comes back.)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum City {
-    NhaTrang,
     DaNang,
 }
 
-/// A selectable sub-area of a city. `area_v2` is set when the API can filter
-/// on it server-side (Đà Nẵng districts); wards are matched client-side only.
+/// A selectable district of a city: its label as the API reports it in
+/// `area_name`, and its `area_v2` code for server-side filtering.
 pub struct Place {
     pub label: &'static str,
-    pub area_v2: Option<&'static str>,
+    pub area_v2: &'static str,
 }
-
-const fn ward(label: &'static str) -> Place {
-    Place {
-        label,
-        area_v2: None,
-    }
-}
-
-const fn district(label: &'static str, area_v2: &'static str) -> Place {
-    Place {
-        label,
-        area_v2: Some(area_v2),
-    }
-}
-
-/// Nha Trang wards present in the live feed, matched verbatim against
-/// `ward_name`.
-const NHA_TRANG_WARDS: &[Place] = &[
-    ward("Phường Lộc Thọ"),
-    ward("Phường Phước Hải"),
-    ward("Phường Phước Long"),
-    ward("Phường Tân Lập"),
-    ward("Phường Xương Huân"),
-    ward("Phường Vĩnh Hòa"),
-    ward("Phường Vĩnh Hải"),
-    ward("Phường Vĩnh Phước"),
-    ward("Phường Vĩnh Trường"),
-    ward("Phường Ngọc Hiệp"),
-    ward("Xã Vĩnh Thái"),
-];
 
 /// Đà Nẵng districts from the regions endpoint (Hoàng Sa, the islands, left
 /// out), matched verbatim against `area_name`.
 const DA_NANG_DISTRICTS: &[Place] = &[
-    district("Quận Hải Châu", "301703"),
-    district("Quận Thanh Khê", "301702"),
-    district("Quận Sơn Trà", "301704"),
-    district("Quận Ngũ Hành Sơn", "301705"),
-    district("Quận Liên Chiểu", "301701"),
-    district("Quận Cẩm Lệ", "301706"),
-    district("Huyện Hòa Vang", "301707"),
+    Place {
+        label: "Quận Hải Châu",
+        area_v2: "301703",
+    },
+    Place {
+        label: "Quận Thanh Khê",
+        area_v2: "301702",
+    },
+    Place {
+        label: "Quận Sơn Trà",
+        area_v2: "301704",
+    },
+    Place {
+        label: "Quận Ngũ Hành Sơn",
+        area_v2: "301705",
+    },
+    Place {
+        label: "Quận Liên Chiểu",
+        area_v2: "301701",
+    },
+    Place {
+        label: "Quận Cẩm Lệ",
+        area_v2: "301706",
+    },
+    Place {
+        label: "Huyện Hòa Vang",
+        area_v2: "301707",
+    },
 ];
 
 impl City {
-    pub const ALL: &'static [City] = &[City::NhaTrang, City::DaNang];
+    pub const ALL: &'static [City] = &[City::DaNang];
 
     /// Config/command slug.
     pub fn slug(self) -> &'static str {
         match self {
-            City::NhaTrang => "nhatrang",
             City::DaNang => "danang",
         }
     }
@@ -113,46 +103,25 @@ impl City {
 
     pub fn label(self) -> &'static str {
         match self {
-            City::NhaTrang => "Nha Trang",
             City::DaNang => "Da Nang",
         }
     }
 
     pub fn region_v2(self) -> &'static str {
         match self {
-            City::NhaTrang => "7044",
             City::DaNang => "3017",
-        }
-    }
-
-    /// `area_v2` that scopes the whole city, when the city is a sub-area of
-    /// its region.
-    pub fn area_v2(self) -> Option<&'static str> {
-        match self {
-            City::NhaTrang => Some("704401"),
-            City::DaNang => None,
         }
     }
 
     pub fn places(self) -> &'static [Place] {
         match self {
-            City::NhaTrang => NHA_TRANG_WARDS,
             City::DaNang => DA_NANG_DISTRICTS,
-        }
-    }
-
-    /// What a [`Place`] is called in this city's UI.
-    pub fn place_noun(self) -> &'static str {
-        match self {
-            City::NhaTrang => "ward",
-            City::DaNang => "district",
         }
     }
 
     /// The ad field a [`Place`] label is matched against.
     pub fn place_of(self, ad: &Ad) -> Option<&str> {
         match self {
-            City::NhaTrang => ad.ward_name.as_deref(),
             City::DaNang => ad.area_name.as_deref(),
         }
     }
@@ -276,8 +245,8 @@ impl Ad {
 
 /// Fetch the newest `pages` × [`PAGE_LIMIT`] for-rent ads in `city` and
 /// `category` (a `cg` code), newest first as the API returns them. `areas`
-/// narrows to specific `area_v2` codes (Đà Nẵng districts); empty means the
-/// whole city. Stops early once the listing is exhausted.
+/// narrows to specific `area_v2` codes (districts); empty means the whole
+/// city. Stops early once the listing is exhausted.
 pub async fn fetch_rent(
     client: &reqwest::Client,
     cfg: &Config,
@@ -287,9 +256,7 @@ pub async fn fetch_rent(
     pages: usize,
 ) -> Result<Vec<Ad>> {
     let area_param = if areas.is_empty() {
-        city.area_v2()
-            .map(|a| format!("&area_v2={a}"))
-            .unwrap_or_default()
+        String::new()
     } else {
         format!("&area_v2={}", areas.join(","))
     };
@@ -392,12 +359,12 @@ mod tests {
     /// Hits the real API; run with `cargo test -- --ignored`.
     #[tokio::test]
     #[ignore = "network"]
-    async fn live_fetch_rent_returns_nha_trang_homes() {
+    async fn live_fetch_rent_returns_da_nang_homes() {
         std::env::set_var("BOT_TOKEN", "test");
         std::env::set_var("CHAT_ID", "1");
         let cfg = Config::from_env().unwrap();
         let client = reqwest::Client::new();
-        let ads = fetch_rent(&client, &cfg, City::NhaTrang, &[], CATEGORY_ALL, 2)
+        let ads = fetch_rent(&client, &cfg, City::DaNang, &[], CATEGORY_APARTMENT, 2)
             .await
             .unwrap();
         assert!(
@@ -405,10 +372,14 @@ mod tests {
             "expected two pages, got {}",
             ads.len()
         );
-        let homes: Vec<&Ad> = ads.iter().filter(|a| a.is_home()).collect();
-        assert!(!homes.is_empty());
-        assert!(ads.iter().all(|a| a.city == Some(City::NhaTrang)));
-        // Đà Nẵng, one district, apartments only: the server-side filter holds.
+        assert!(ads
+            .iter()
+            .all(|a| a.is_home() && a.city == Some(City::DaNang)));
+        assert!(ads.iter().all(|a| a.list_id > 0 && a.list_time > 0));
+        assert!(ads.iter().all(|a| a.price.is_some()));
+        // Newest first, as documented.
+        assert!(ads.windows(2).all(|w| w[0].list_time >= w[1].list_time));
+        // One district, server-side filter holds.
         let dn = fetch_rent(
             &client,
             &cfg,
@@ -426,10 +397,6 @@ mod tests {
             "{:?}",
             dn.iter().map(|a| &a.area_name).collect::<Vec<_>>()
         );
-        assert!(homes.iter().all(|a| a.list_id > 0 && a.list_time > 0));
-        assert!(homes.iter().all(|a| a.price.is_some()));
-        // Newest first, as documented.
-        assert!(ads.windows(2).all(|w| w[0].list_time >= w[1].list_time));
     }
 
     #[test]
@@ -452,9 +419,7 @@ mod tests {
             }
         }
         assert_eq!(City::from_slug("hanoi"), None);
-        // Đà Nẵng filters server-side by district; Nha Trang wards do not.
-        assert!(City::DaNang.places().iter().all(|p| p.area_v2.is_some()));
-        assert!(City::NhaTrang.places().iter().all(|p| p.area_v2.is_none()));
+        assert_eq!(City::from_slug("nhatrang"), None);
         assert_eq!(strip_place_prefix("Quận Hải Châu"), "Hải Châu");
         assert_eq!(strip_place_prefix(" Xã Vĩnh Thái "), "Vĩnh Thái");
         assert_eq!(strip_place_prefix("Mỹ An"), "Mỹ An");
