@@ -34,7 +34,7 @@ pub struct Config {
     pub nhatot_chat_id: Option<i64>,
     pub nhatot_interval: Duration,
     pub nhatot_endpoint: String,
-    /// Cities the notifier polls (the `/danang` command works regardless).
+    /// Cities the notifier polls (the `/nhatrang` command works regardless).
     pub nhatot_cities: Vec<City>,
     /// Chợ Tốt `cg` category code the notifier polls (default: all real
     /// estate, filtered to apartments + houses client-side).
@@ -93,13 +93,13 @@ impl Config {
             "NHATOT_ENDPOINT",
             "https://gateway.chotot.com/v1/public/ad-listing",
         );
-        let nhatot_cities = optional("NHATOT_CITIES", "danang")
+        let nhatot_cities = optional("NHATOT_CITIES", "nhatrang")
             .split(',')
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(|slug| {
                 City::from_slug(slug).with_context(|| {
-                    format!("NHATOT_CITIES: unknown city {slug:?} (known: danang)")
+                    format!("NHATOT_CITIES: unknown city {slug:?} (known: nhatrang)")
                 })
             })
             .collect::<Result<Vec<_>>>()?;

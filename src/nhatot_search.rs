@@ -1,11 +1,10 @@
-//! Interactive `/danang` filter builder over Chợ Tốt listings, parameterised
-//! by [`City`] so another city is a table entry away.
+//! Interactive `/nhatrang` filter builder over Chợ Tốt listings,
+//! parameterised by [`City`] so another city is a table entry away.
 //!
 //! Same shape as `bostad_search` (main screen → one sub-menu per filter).
-//! The category drives the API's `cg` parameter and selected districts go to
-//! the API as `area_v2` codes; everything else is applied client-side over
-//! the newest pages. Rents are VND per month — Đà Nẵng apartments run roughly
-//! 5–40 million, typically 8–15.
+//! The category drives the API's `cg` parameter; wards (and everything else)
+//! are applied client-side over the newest pages. Rents are VND per month —
+//! Nha Trang apartments run roughly 5–55 million, typically 12–20.
 
 use frankenstein::types::{InlineKeyboardButton, InlineKeyboardMarkup};
 
@@ -27,10 +26,8 @@ const SIZES: [u32; 6] = [0, 30, 40, 50, 60, 80];
 /// `list_time`, which Chợ Tốt rewrites when an ad is bumped, so this is
 /// "listed or bumped within" — a bump means the place is still available.
 const AGES: [i64; 5] = [0, 24, 72, 168, 336];
-/// Default max age. Đà Nẵng posts ~150 apartment ads a day, so a search is
-/// always capped by the 40-result limit before the age bites; the preset
-/// mainly matters once districts and rent narrow things down.
-const DEFAULT_AGE_HOURS: i64 = 72;
+/// Default max age: a week of Nha Trang ads fits under the 40-result cap.
+const DEFAULT_AGE_HOURS: i64 = 168;
 
 /// Property type, mapped to the API's `cg` code.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -79,7 +76,7 @@ impl Category {
 pub struct Filters {
     pub city: City,
     pub category: Category,
-    /// Selected district labels; empty = whole city.
+    /// Selected ward labels; empty = whole city.
     pub places: Vec<&'static str>,
     /// Minimum room count; 0 = any.
     pub min_rooms: u8,
@@ -94,7 +91,7 @@ pub struct Filters {
 
 impl Default for Filters {
     fn default() -> Self {
-        Filters::for_city(City::DaNang)
+        Filters::for_city(City::NhaTrang)
     }
 }
 
@@ -112,7 +109,7 @@ impl Filters {
         }
     }
 
-    /// Short human-readable district summary for labels/messages.
+    /// Short human-readable ward summary for labels/messages.
     pub fn place_summary(&self) -> String {
         let names: Vec<&str> = self
             .city
@@ -129,13 +126,14 @@ impl Filters {
         }
     }
 
-    /// `area_v2` codes to send to the API for the selected districts.
+    /// `area_v2` codes to send to the API for the selected places (only
+    /// districts have them; ward selections are client-side).
     pub fn area_codes(&self) -> Vec<&'static str> {
         self.city
             .places()
             .iter()
             .filter(|p| self.places.contains(&p.label))
-            .map(|p| p.area_v2)
+            .filter_map(|p| p.area_v2)
             .collect()
     }
 
@@ -250,10 +248,9 @@ pub fn apply(filters: &mut Filters, data: &str) -> Action {
     }
 }
 
-/// Does an ad pass all filters? The category and districts also drive the
-/// fetch, so those checks mostly matter for `Both`; the rest is purely
-/// client-side. `now_ms` is the current time in epoch milliseconds (the unit
-/// `list_time` uses).
+/// Does an ad pass all filters? The category also drives the fetch, so that
+/// check mostly matters for `Both`; the rest is purely client-side. `now_ms`
+/// is the current time in epoch milliseconds (the unit `list_time` uses).
 pub fn passes(filters: &Filters, ad: &Ad, now_ms: i64) -> bool {
     if !filters.category.matches(ad) {
         return false;
@@ -322,7 +319,7 @@ pub fn render(screen: Screen, filters: &Filters) -> (String, InlineKeyboardMarku
         ),
         Screen::Size => ("📐 Minimum size (m²):".to_string(), size_keyboard(filters)),
         Screen::Place => (
-            "📍 Tap districts to toggle (none selected = whole city):".to_string(),
+            "📍 Tap wards to toggle (none selected = whole city):".to_string(),
             place_keyboard(filters),
         ),
     }
@@ -331,7 +328,7 @@ pub fn render(screen: Screen, filters: &Filters) -> (String, InlineKeyboardMarku
 /// A multi-line summary of the active filters, for the "Searching…" message.
 pub fn describe(f: &Filters) -> String {
     format!(
-        "🏙 City: {}\n⏱ Age: {}\n🗂 Type: {}\n📍 District: {}\n🛏 Rooms: {}\n💰 Rent: {}–{}\n📐 Min size: {}",
+        "🏙 City: {}\n⏱ Age: {}\n🗂 Type: {}\n📍 Ward: {}\n🛏 Rooms: {}\n💰 Rent: {}–{}\n📐 Min size: {}",
         f.city.label(),
         age_text(f.max_age_hours),
         f.category.label(),
@@ -385,7 +382,7 @@ fn size_text(size: Option<u32>) -> String {
 
 fn main_text(f: &Filters) -> String {
     format!(
-        "🔍 Search {} rentals (Chợ Tốt)\n\n⏱ Age: {}\n🗂 Type: {}\n🛏 Rooms: {}\n💰 Rent: {}–{} VND/month\n📐 Min size: {}\n📍 District: {}\n\nTap a field to change it, then Search.",
+        "🔍 Search {} rentals (Chợ Tốt)\n\n⏱ Age: {}\n🗂 Type: {}\n🛏 Rooms: {}\n💰 Rent: {}–{} VND/month\n📐 Min size: {}\n📍 Ward: {}\n\nTap a field to change it, then Search.",
         f.city.label(),
         age_text(f.max_age_hours),
         f.category.label(),
@@ -425,7 +422,7 @@ fn main_keyboard(f: &Filters) -> InlineKeyboardMarkup {
             "menu:size",
         )],
         vec![button(
-            format!("📍 District: {}", f.place_summary()),
+            format!("📍 Ward: {}", f.place_summary()),
             "menu:place",
         )],
         vec![button("🔎 Search".to_string(), "go")],
@@ -514,7 +511,7 @@ fn size_keyboard(f: &Filters) -> InlineKeyboardMarkup {
     menu(buttons, 3)
 }
 
-/// Multi-select district picker: a toggle grid plus Clear / Done controls.
+/// Multi-select ward picker: a toggle grid plus Clear / Done controls.
 fn place_keyboard(f: &Filters) -> InlineKeyboardMarkup {
     let mut inline_keyboard: Vec<Vec<InlineKeyboardButton>> = f
         .city
@@ -556,7 +553,7 @@ mod tests {
 
     fn ad(
         category: u32,
-        district: &str,
+        ward: &str,
         rooms: Option<u8>,
         price: Option<i64>,
         size: Option<f64>,
@@ -572,38 +569,38 @@ mod tests {
             price_string: None,
             rooms,
             size,
-            ward_name: Some("Phường Mỹ An".to_string()),
+            ward_name: Some(ward.to_string()),
             street_name: None,
-            area_name: Some(district.to_string()),
-            region_name: Some("Đà Nẵng".to_string()),
+            area_name: Some("Thành phố Nha Trang".to_string()),
+            region_name: Some("Khánh Hòa".to_string()),
             pty_project_name: None,
             category: Some(category),
             category_name: None,
             translated: false,
-            city: Some(City::DaNang),
+            city: Some(City::NhaTrang),
         }
     }
 
     #[test]
     fn category_filters_by_code() {
         let apt = Filters::default();
-        assert!(pass(&apt, &ad(1010, "Quận Hải Châu", None, None, None)));
-        assert!(!pass(&apt, &ad(1020, "Quận Hải Châu", None, None, None)));
+        assert!(pass(&apt, &ad(1010, "Phường Lộc Thọ", None, None, None)));
+        assert!(!pass(&apt, &ad(1020, "Phường Lộc Thọ", None, None, None)));
 
         let house = Filters {
             category: Category::House,
             ..Filters::default()
         };
-        assert!(pass(&house, &ad(1020, "Quận Hải Châu", None, None, None)));
-        assert!(!pass(&house, &ad(1010, "Quận Hải Châu", None, None, None)));
+        assert!(pass(&house, &ad(1020, "Phường Lộc Thọ", None, None, None)));
+        assert!(!pass(&house, &ad(1010, "Phường Lộc Thọ", None, None, None)));
 
         let both = Filters {
             category: Category::Both,
             ..Filters::default()
         };
-        assert!(pass(&both, &ad(1010, "Quận Hải Châu", None, None, None)));
-        assert!(pass(&both, &ad(1020, "Quận Hải Châu", None, None, None)));
-        assert!(!pass(&both, &ad(1030, "Quận Hải Châu", None, None, None))); // office
+        assert!(pass(&both, &ad(1010, "Phường Lộc Thọ", None, None, None)));
+        assert!(pass(&both, &ad(1020, "Phường Lộc Thọ", None, None, None)));
+        assert!(!pass(&both, &ad(1030, "Phường Lộc Thọ", None, None, None))); // office
 
         assert_eq!(Category::Apartment.cg(), 1010);
         assert_eq!(Category::House.cg(), 1020);
@@ -619,7 +616,7 @@ mod tests {
             min_size: Some(50),
             ..Filters::default()
         };
-        let w = "Quận Sơn Trà";
+        let w = "Phường Phước Hải";
         assert!(pass(
             &f,
             &ad(1010, w, Some(2), Some(14_000_000), Some(63.0))
@@ -645,35 +642,34 @@ mod tests {
     }
 
     #[test]
-    fn district_multiselect_matches_area_name_and_maps_to_codes() {
+    fn ward_multiselect_matches_ward_name() {
         let mut f = Filters::default();
-        assert_eq!(f.city, City::DaNang);
+        assert_eq!(f.city, City::NhaTrang);
         assert_eq!(f.place_summary(), "Whole city");
-        let son_tra = City::DaNang
+        let vinh_hoa = City::NhaTrang
             .places()
             .iter()
-            .position(|p| p.label == "Quận Sơn Trà")
+            .position(|p| p.label == "Phường Vĩnh Hòa")
             .unwrap();
         assert!(matches!(
             apply(&mut f, "place:0"),
             Action::Show(Screen::Place)
-        )); // Hải Châu
-        apply(&mut f, &format!("place:{son_tra}"));
-        assert_eq!(f.place_summary(), "Hải Châu, Sơn Trà");
-        assert_eq!(f.area_codes(), ["301703", "301704"]);
+        )); // Lộc Thọ
+        apply(&mut f, &format!("place:{vinh_hoa}"));
+        assert_eq!(f.place_summary(), "Lộc Thọ, Vĩnh Hòa");
+        assert!(f.area_codes().is_empty()); // wards are client-side only
 
-        assert!(pass(&f, &ad(1010, "Quận Sơn Trà", None, None, None)));
-        assert!(!pass(&f, &ad(1010, "Quận Ngũ Hành Sơn", None, None, None)));
+        assert!(pass(&f, &ad(1010, "Phường Vĩnh Hòa", None, None, None)));
+        assert!(!pass(&f, &ad(1010, "Phường Vĩnh Phước", None, None, None)));
 
         // Toggling again removes it; Clear returns to "whole city".
-        apply(&mut f, &format!("place:{son_tra}"));
-        assert!(!pass(&f, &ad(1010, "Quận Sơn Trà", None, None, None)));
+        apply(&mut f, &format!("place:{vinh_hoa}"));
+        assert!(!pass(&f, &ad(1010, "Phường Vĩnh Hòa", None, None, None)));
         assert!(matches!(
             apply(&mut f, "placeclear"),
             Action::Show(Screen::Place)
         ));
-        assert!(pass(&f, &ad(1010, "Quận Ngũ Hành Sơn", None, None, None)));
-        assert!(f.area_codes().is_empty());
+        assert!(pass(&f, &ad(1010, "Phường Vĩnh Phước", None, None, None)));
         // Out-of-range index is ignored.
         assert!(matches!(
             apply(&mut f, "place:99"),
@@ -682,20 +678,20 @@ mod tests {
         assert!(f.places.is_empty());
 
         let (text, _) = render(Screen::Place, &f);
-        assert!(text.contains("Tap districts"));
-        assert!(main_text(&f).contains("Search Da Nang rentals"));
-        assert!(main_text(&f).contains("📍 District:"));
-        assert!(describe(&f).contains("🏙 City: Da Nang"));
+        assert!(text.contains("Tap wards"));
+        assert!(main_text(&f).contains("Search Nha Trang rentals"));
+        assert!(main_text(&f).contains("📍 Ward:"));
+        assert!(describe(&f).contains("🏙 City: Nha Trang"));
     }
 
     #[test]
     fn age_filter_uses_list_time() {
         let mut f = Filters::default();
         assert_eq!(f.max_age_hours, Some(DEFAULT_AGE_HOURS));
-        let mut old = ad(1010, "Quận Hải Châu", None, None, None);
+        let mut old = ad(1010, "Phường Lộc Thọ", None, None, None);
         old.list_time = NOW_MS - 8 * 24 * 3_600_000; // 8 days ago
         assert!(!pass(&f, &old));
-        assert!(pass(&f, &ad(1010, "Quận Hải Châu", None, None, None)));
+        assert!(pass(&f, &ad(1010, "Phường Lộc Thọ", None, None, None)));
 
         assert!(matches!(
             apply(&mut f, "menu:age"),

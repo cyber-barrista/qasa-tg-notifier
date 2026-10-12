@@ -169,7 +169,7 @@ pub const BOSTAD_STATE: SeenLabel = SeenLabel {
 
 pub const NHATOT_STATE: SeenLabel = SeenLabel {
     title: "nhatot notifier state",
-    blurb: "Recent Da Nang (Chợ Tốt) ad ids already notified — please don't unpin or delete.",
+    blurb: "Recent Nha Trang (Chợ Tốt) ad ids already notified — please don't unpin or delete.",
 };
 
 /// Parsed contents of a seen-set chat's pinned state message.
@@ -825,15 +825,15 @@ mod tests {
             price_string: Some("14 triệu/tháng".to_string()),
             rooms: Some(2),
             size: Some(63.0),
-            ward_name: Some("Phường An Hải Tây".to_string()),
-            street_name: Some("Ngô Quyền".to_string()),
-            area_name: Some("Quận Sơn Trà".to_string()),
-            region_name: Some("Đà Nẵng".to_string()),
-            pty_project_name: Some("Mường Thanh Sơn Trà".to_string()),
+            ward_name: Some("Phường Vĩnh Hòa".to_string()),
+            street_name: Some("Trịnh Hoài Đức".to_string()),
+            area_name: Some("Thành phố Nha Trang".to_string()),
+            region_name: Some("Khánh Hòa".to_string()),
+            pty_project_name: Some("Mường Thanh Viễn Triều".to_string()),
             category: Some(1010),
             category_name: Some("Căn hộ/Chung cư".to_string()),
             translated: false,
-            city: Some(nhatot::City::DaNang),
+            city: Some(nhatot::City::NhaTrang),
         }
     }
 
@@ -845,7 +845,7 @@ mod tests {
         // Numeric price wins over the Vietnamese price string.
         assert!(out.contains("💰 14M ₫/month"));
         assert!(out.contains("63 m² · 2 bedrooms"));
-        assert!(out.contains("📍 Ngô Quyền, An Hải Tây, Sơn Trà, Da Nang · Mường Thanh Sơn Trà"));
+        assert!(out.contains("📍 Trịnh Hoài Đức, Vĩnh Hòa, Nha Trang · Mường Thanh Viễn Triều"));
         // 1790570223 = 2026-09-28 UTC.
         assert!(out.contains("🏷 Apartment · ↻ bumped (first listed 2026-09-28)"));
         assert!(!out.contains("translated"));
@@ -864,7 +864,7 @@ mod tests {
         assert!(out.contains("💰 14 triệu/tháng"));
         assert!(out.contains("1 bedroom\n"));
         assert!(!out.contains("bumped"));
-        assert!(out.contains("📍 Ngô Quyền, An Hải Tây, Sơn Trà, Da Nang\n"));
+        assert!(out.contains("📍 Trịnh Hoài Đức, Vĩnh Hòa, Nha Trang\n"));
         assert!(out.contains("🏷 Apartment · 🌐 translated"));
         assert!(!out.contains("📝"));
     }
@@ -872,24 +872,29 @@ mod tests {
     #[test]
     fn nhatot_location_dedups_pasted_addresses() {
         let mut ad = nhatot_ad();
-        // Sellers paste the whole address into the street field.
-        ad.street_name =
-            Some("Đường Ngô Quyền, Phường An Hải Tây, Quận Sơn Trà, Đà Nẵng".to_string());
+        // Sellers paste the whole address into the street field; the
+        // city-level `area_name` is dropped in favour of the city label.
+        ad.street_name = Some(
+            "Đường Phạm Văn Đồng, Phường Vĩnh Phước, Thành phố Nha Trang, Khánh Hòa".to_string(),
+        );
+        ad.ward_name = Some("Phường Vĩnh Phước".to_string());
         assert_eq!(
             nhatot_location(&ad),
-            ["Ngô Quyền", "An Hải Tây", "Sơn Trà", "Da Nang"]
+            ["Phạm Văn Đồng", "Vĩnh Phước", "Nha Trang"]
         );
 
-        // No street: ward, district, city.
+        // No street: ward, city.
         ad.street_name = None;
-        assert_eq!(nhatot_location(&ad), ["An Hải Tây", "Sơn Trà", "Da Nang"]);
+        assert_eq!(nhatot_location(&ad), ["Vĩnh Phước", "Nha Trang"]);
 
-        // A street equal to the ward collapses to one part; a city-level
-        // `area_name` is dropped in favour of the city label.
-        ad.ward_name = Some("Xã Hòa Bắc".to_string());
-        ad.street_name = Some("Hòa Bắc".to_string());
-        ad.area_name = Some("Thành phố Đà Nẵng".to_string());
-        assert_eq!(nhatot_location(&ad), ["Hòa Bắc", "Da Nang"]);
+        // Commune prefix, and a street equal to the ward collapses to one part.
+        ad.ward_name = Some("Xã Vĩnh Thái".to_string());
+        ad.street_name = Some("Vĩnh Thái".to_string());
+        assert_eq!(nhatot_location(&ad), ["Vĩnh Thái", "Nha Trang"]);
+
+        // A district-level `area_name` (as Đà Nẵng reports) is kept.
+        ad.area_name = Some("Quận Sơn Trà".to_string());
+        assert_eq!(nhatot_location(&ad), ["Vĩnh Thái", "Sơn Trà", "Nha Trang"]);
 
         // Houses get the English category label too.
         ad.category = Some(1020);
